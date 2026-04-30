@@ -4,29 +4,12 @@ project(replay)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
-include_directories(${ENYO_LIBRARY_PATH}/include /opt/homebrew/include/ ${CMAKE_SOURCE_DIR})
+include_directories(/opt/homebrew/include/)
 
 add_executable(replay replay.cpp)
 
-find_package(fmt)
+find_package(fmt REQUIRED)
 target_link_libraries(replay PRIVATE fmt::fmt-header-only)
-
-if(CMAKE_BUILD_TYPE STREQUAL "Profile")
-    if(APPLE)
-        find_library(PROFILER_LIBRARY NAMES profiler HINTS /opt/homebrew/lib)
-        if(NOT PROFILER_LIBRARY)
-            message(FATAL_ERROR "Google CPU Profiler library not found.")
-        endif()
-        message(STATUS "Profiler library found at: ${PROFILER_LIBRARY}")
-    endif()
-    target_link_libraries(replay PRIVATE ${PROFILER_LIBRARY})
-endif()
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_link_libraries(replay PRIVATE enyo_lib)
-else()
-    target_link_libraries(replay PRIVATE enyo_lib)
-endif()
 
 string(ASCII 27 Esc)
 set(COLOR_RESET "${Esc}[0m")

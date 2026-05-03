@@ -79,53 +79,53 @@ class EngineProcess {
     bool gui;
 
 public:
-    EngineProcess(const std::string& engine_path, bool quiet_mode = false, bool gui_mode = false) 
+    EngineProcess(const std::string& engine_path, bool quiet_mode = false, bool gui_mode = false)
         : quiet(quiet_mode), gui(gui_mode) {
         int pipe_to_engine[2];
         int pipe_from_engine[2];
-        
+
         if (pipe(pipe_to_engine) == -1 || pipe(pipe_from_engine) == -1) {
             throw std::runtime_error("Failed to create pipes");
         }
-        
+
         pid = fork();
         if (pid == -1) {
             throw std::runtime_error("Failed to fork");
         }
-        
+
         if (pid == 0) {
             // Child process
             dup2(pipe_to_engine[0], STDIN_FILENO);
             dup2(pipe_from_engine[1], STDOUT_FILENO);
-            
+
             // Suppress stderr debug output
             int devnull = open("/dev/null", O_WRONLY);
             dup2(devnull, STDERR_FILENO);
             close(devnull);
-            
+
             close(pipe_to_engine[0]);
             close(pipe_to_engine[1]);
             close(pipe_from_engine[0]);
             close(pipe_from_engine[1]);
-            
+
             execl(engine_path.c_str(), engine_path.c_str(), nullptr);
             exit(1);
         }
-        
+
         // Parent process
         close(pipe_to_engine[0]);
         close(pipe_from_engine[1]);
-        
+
         engine_in = fdopen(pipe_to_engine[1], "w");
         engine_out = fdopen(pipe_from_engine[0], "r");
-        
+
         if (!engine_in || !engine_out) {
             throw std::runtime_error("Failed to open streams");
         }
-        
+
         setbuf(engine_in, nullptr);
     }
-    
+
     ~EngineProcess() {
         if (engine_in) {
             fprintf(engine_in, "quit\n");
@@ -136,11 +136,11 @@ public:
             waitpid(pid, nullptr, 0);
         }
     }
-    
+
     void send(const std::string& cmd) {
         fprintf(engine_in, "%s\n", cmd.c_str());
     }
-    
+
     std::string readLine() {
         char buffer[8192];
         if (fgets(buffer, sizeof(buffer), engine_out)) {
@@ -152,7 +152,7 @@ public:
         }
         return "";
     }
-    
+
     std::string waitForBestmove(int move_num, int total_moves, const std::string& current_position, const std::string& expected = "") {
         std::string line;
         int current_depth = 0;
@@ -233,7 +233,7 @@ public:
                     fflush(stdout);
                 }
             }
-            
+
             // Filter output
             bool should_print = true;
             if (line.find("root ") == 0) {
@@ -241,11 +241,11 @@ public:
             } else if ((quiet || gui) && (line.find("info ") == 0 || line.find("info string") == 0)) {
                 should_print = false;
             }
-            
+
             if (should_print && !quiet && !gui) {
                 std::cout << line << std::endl;
             }
-            
+
             if (line.find("bestmove ") == 0) {
                 // Format: "move|score|wdl|mate_in" (mate_in=0 when not a mate score)
                 int mate_in = is_mate ? final_score : 0;
@@ -313,32 +313,32 @@ int main(int argc, char* argv[]) {
             logfile = arg;
         }
     }
-    
+
     std::ifstream file(logfile);
     if (!file.is_open()) {
         std::cerr << "Failed to open logfile: " << logfile << std::endl;
         return 1;
     }
-    
+
     std::vector<std::string> commands;
     std::vector<std::string> bestmoves;
     std::string line;
     std::streampos firstUciNewGamePos = -1;
-    
+
     // First pass: find first ucinewgame
     while (std::getline(file, line)) {
         if (line == "ucinewgame" && firstUciNewGamePos == -1) {
             firstUciNewGamePos = file.tellg();
         }
     }
-    
+
     file.clear();
     file.seekg(0, std::ios::beg);
-    
+
     if (firstUciNewGamePos != -1) {
         file.seekg(firstUciNewGamePos);
     }
-    
+
     // Second pass: extract all bestmoves
     std::vector<std::string> setoptions;
     while (std::getline(file, line)) {
@@ -349,14 +349,14 @@ int main(int argc, char* argv[]) {
             setoptions.push_back(line);
         }
     }
-    
+
     file.clear();
     file.seekg(0, std::ios::beg);
-    
+
     if (firstUciNewGamePos != -1) {
         file.seekg(firstUciNewGamePos);
     }
-    
+
     // Third pass: extract position+go pairs with depths (and timing data)
     std::string current_position = "";
     std::vector<TimingRecord> timings;
@@ -423,9 +423,9 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    
+
     file.close();
-    
+
     int go_cmd_count = std::count_if(commands.begin(), commands.end(),
                                       [](const std::string& s) { return s.find("go depth") == 0; });
 
@@ -481,10 +481,10 @@ int main(int argc, char* argv[]) {
         fmt::print("Using engine: {}\n", engine_path);
         fmt::print("Total moves to replay: {}\n\n", bestmoves.size());
     }
-    
+
     try {
         EngineProcess engine(engine_path, quiet, gui);
-        
+
         // Wait for uciok
         engine.send("uci");
         while (true) {
@@ -492,13 +492,13 @@ int main(int argc, char* argv[]) {
             if (!quiet && !gui) std::cout << line << std::endl;
             if (line == "uciok") break;
         }
-        
+
         // Send setoptions from original game
         for (const auto& opt : setoptions) {
             if (!quiet && !gui) fmt::print("uci:> {}\n", opt);
             engine.send(opt);
         }
-        
+
         int bestmoveIndex = 0;
         int commandIndex = 0;
         int totalCommands = commands.size();
@@ -512,7 +512,7 @@ int main(int argc, char* argv[]) {
         int final_mate_in = 0;
         std::string final_side = "";
         bool had_any_move = false;
-        
+
         // Show initial board in gui mode
         if (gui && !commands.empty()) {
             // Find and send first position
@@ -522,7 +522,7 @@ int main(int argc, char* argv[]) {
                     break;
                 }
             }
-            
+
             fmt::print("\033[2J\033[H");  // Clear screen
             engine.send("d");
             while (true) {
@@ -536,14 +536,14 @@ int main(int argc, char* argv[]) {
             }
             fmt::print("\n");
         }
-        
+
         for (const auto& cmd : commands) {
             commandIndex++;
-            
+
             if (cmd.find("position ") == 0) {
                 current_position = cmd;
             }
-            
+
             if (cmd.find("go ") != std::string::npos) {
                 if (!quiet && !gui) {
                     fmt::print("[{}/{}] ", skip + bestmoveIndex + 1, total_moves);
@@ -628,7 +628,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-        
+
         engine.send("d");
         while (true) {
             line = engine.readLine();
@@ -692,6 +692,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
-    
+
     return 0;
 }

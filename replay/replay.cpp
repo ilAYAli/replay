@@ -276,6 +276,7 @@ int main(int argc, char* argv[]) {
             "  --engine <path>   Path to the engine binary (default: {})\n"
             "  --skip N          Skip the first N moves in the log\n"
             "  --moves N         Replay at most N moves (after skipping)\n"
+            "  --count N         Alias for --moves\n"
             "  --print           Print the log's bestmoves and exit (no engine run)\n"
             "  --verbose, -v     Print full UCI traffic instead of the compact progress bar\n"
             "  --gui             Show a live board after each move\n"
@@ -301,9 +302,13 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--skip" && i + 1 < argc) {
             skip = std::stoi(argv[++i]);
             if (skip < 0) skip = 0;
-        } else if (arg == "--moves" && i + 1 < argc) {
+        } else if ((arg == "--moves" || arg == "--count") && i + 1 < argc) {
             max_moves = std::stoi(argv[++i]);
             if (max_moves < 0) max_moves = 0;
+        } else if (arg.rfind("--", 0) == 0 || arg == "-v" || arg == "-h") {
+            fmt::print(stderr, "Unknown or malformed option: {}\n", arg);
+            print_help(argv[0]);
+            return 1;
         } else {
             logfile = arg;
         }

@@ -402,7 +402,11 @@ int main(int argc, char* argv[]) {
                 start_pos = file.tellg();
             }
 
-            if (saw_bestmove && depth > 0 && !current_position.empty()) {
+            if (saw_bestmove && !current_position.empty()) {
+                // Some positions produce a bestmove with no `info depth` line
+                // (engine fallback / forced move). Replay with depth 1 so the
+                // go/bestmove count stays in lockstep with the log.
+                if (depth <= 0) depth = 1;
                 // Determine side-to-move from the position's moves list.
                 size_t mp = current_position.find("moves ");
                 int mc = 0;

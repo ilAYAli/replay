@@ -25,6 +25,37 @@ int extractDepth(const std::string& line) {
     return -1;
 }
 
+// Find an integer UCI field by key (whitespace-delimited). Returns -1 if absent
+// or unparseable. Ensures we don't match "time" inside "wtime"/"btime".
+int parseIntField(const std::string& line, const std::string& key) {
+    std::string needle = " " + key + " ";
+    size_t pos = line.find(needle);
+    size_t start;
+    if (pos == std::string::npos) {
+        std::string head = key + " ";
+        if (line.rfind(head, 0) == 0) {
+            start = head.size();
+        } else {
+            return -1;
+        }
+    } else {
+        start = pos + needle.size();
+    }
+    size_t end = line.find(' ', start);
+    try {
+        return std::stoi(line.substr(start, end == std::string::npos ? end : end - start));
+    } catch (...) {
+        return -1;
+    }
+}
+
+struct TimingRecord {
+    int wtime_ms;         // -1 if absent from go command
+    int btime_ms;         // -1 if absent from go command
+    int search_time_ms;   // -1 if no info line carried "time"
+    std::string side;     // "White" or "Black" (who was to move)
+};
+
 std::string extractMove(const std::string& line) {
     size_t bestMovePos = line.find("bestmove ");
     if (bestMovePos != std::string::npos) {
@@ -321,8 +352,9 @@ int main(int argc, char* argv[]) {
         file.seekg(firstUciNewGamePos);
     }
     
-    // Third pass: extract position+go pairs with depths
+    // Third pass: extract position+go pairs with depths (and timing data)
     std::string current_position = "";
+    std::vector<TimingRecord> timings;
 
     while (std::getline(file, line)) {
         if (line.empty()) continue;
@@ -332,16 +364,23 @@ int main(int argc, char* argv[]) {
         if (command == "position") {
             current_position = line;
         } else if (command == "go") {
+            // Capture time-control fields from the original `go` line.
+            int wtime_ms = parseIntField(line, "wtime");
+            int btime_ms = parseIntField(line, "btime");
+
             // Scan forward for info depth lines and confirm a bestmove follows
             // before the next go/position/ucinewgame.
             std::string depth_str;
             int depth = 0;
+            int last_time_ms = -1;
             bool saw_bestmove = false;
             std::streampos start_pos = file.tellg();
             while (std::getline(file, depth_str)) {
                 if (depth_str.find("info depth ") != std::string::npos) {
                     int d = extractDepth(depth_str);
                     if (d > depth) depth = d;
+                    int t = parseIntField(depth_str, "time");
+                    if (t >= 0) last_time_ms = t;
                 }
                 if (!depth_str.empty()) {
                     std::string next_cmd = depth_str.substr(0, std::min(depth_str.find(' '), depth_str.size()));
@@ -359,8 +398,18 @@ int main(int argc, char* argv[]) {
             }
 
             if (saw_bestmove && depth > 0 && !current_position.empty()) {
+                // Determine side-to-move from the position's moves list.
+                size_t mp = current_position.find("moves ");
+                int mc = 0;
+                if (mp != std::string::npos) {
+                    std::string ms = current_position.substr(mp + 6);
+                    mc = std::count(ms.begin(), ms.end(), ' ') + 1;
+                }
+                std::string side = (mc % 2 == 0) ? "White" : "Black";
+
                 commands.push_back(current_position);
                 commands.push_back(fmt::format("go depth {}", depth));
+                timings.push_back({wtime_ms, btime_ms, last_time_ms, side});
                 current_position = ""; // Clear so we don't add same position twice
             }
         }
@@ -397,12 +446,18 @@ int main(int argc, char* argv[]) {
         // commands is [position, go, position, go, ...] — drop 2*skip entries
         commands.erase(commands.begin(), commands.begin() + 2 * skip);
         bestmoves.erase(bestmoves.begin(), bestmoves.begin() + skip);
+        if ((int)timings.size() >= skip) {
+            timings.erase(timings.begin(), timings.begin() + skip);
+        }
         fmt::print("Skipping first {} moves; {} remaining\n", skip, bestmoves.size());
     }
 
     if (max_moves >= 0 && (int)bestmoves.size() > max_moves) {
         commands.erase(commands.begin() + 2 * max_moves, commands.end());
         bestmoves.erase(bestmoves.begin() + max_moves, bestmoves.end());
+        if ((int)timings.size() > max_moves) {
+            timings.erase(timings.begin() + max_moves, timings.end());
+        }
         fmt::print("Limiting to {} moves\n", max_moves);
     }
 
@@ -601,6 +656,26 @@ int main(int argc, char* argv[]) {
                 std::string winner = (final_mate_in > 0) ? stm : final_side;
                 fmt::print("Mate               : {} mates in {} {}\n",
                            winner, plies, plies == 1 ? "ply" : "plies");
+            }
+
+            // Time-overrun check: flag moves whose search time met or exceeded
+            // the side's remaining clock at the start of the `go` command.
+            std::vector<std::pair<int, const TimingRecord*>> overruns;
+            for (size_t m = 0; m < timings.size() && (int)m < bestmoveIndex; ++m) {
+                const TimingRecord& t = timings[m];
+                int budget = (t.side == "White") ? t.wtime_ms : t.btime_ms;
+                if (budget <= 0 || t.search_time_ms < 0) continue;
+                if (t.search_time_ms >= budget) {
+                    overruns.push_back({skip + (int)m + 1, &t});
+                }
+            }
+            if (!overruns.empty()) {
+                fmt::print("Time overruns      : {}\n", overruns.size());
+                for (const auto& [move_no, t] : overruns) {
+                    int budget = (t->side == "White") ? t->wtime_ms : t->btime_ms;
+                    fmt::print("  WARNING: Move {} ({}) used {}ms of {}ms remaining\n",
+                               move_no, t->side, t->search_time_ms, budget);
+                }
             }
         }
 

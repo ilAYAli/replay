@@ -129,6 +129,12 @@ public:
         }
 
         setbuf(engine_in, nullptr);
+        // Also drop stdio buffering on the read side. fgets otherwise pulls
+        // multi-line chunks into its own buffer, after which poll() reports
+        // "no data" on the kernel pipe even though there are lines queued in
+        // stdio — making waitReadable() falsely block for its full timeout
+        // and inflating the thinking-line countdown on bursty output.
+        setbuf(engine_out, nullptr);
     }
 
     ~EngineProcess() {

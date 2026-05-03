@@ -290,7 +290,7 @@ public:
 
 int main(int argc, char* argv[]) {
     std::string logfile = "/tmp/enyo.log";
-    std::string engine_path = std::string(getenv("HOME")) + "/code/cpp/chess/Enyo/build/enyo";
+    std::string engine_path = std::string(getenv("HOME")) + "/code/cpp/chess/enyo/build/enyo";
     bool quiet = true;
     bool gui = false;
     bool print_only = false;

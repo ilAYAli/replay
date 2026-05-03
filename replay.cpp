@@ -295,6 +295,7 @@ int main(int argc, char* argv[]) {
     bool gui = false;
     bool print_only = false;
     bool time_mode = false;  // --time: replay original `go wtime...` instead of `go depth N`
+    int threads = -1;    // -1 = don't send setoption; otherwise override engine default
     int skip = 0;
     int max_moves = -1;  // -1 = replay all remaining
 
@@ -318,6 +319,10 @@ int main(int argc, char* argv[]) {
             "  --time            Replay with the original `go wtime X btime Y winc Z binc W`\n"
             "                    command from the log, not `go depth N`. Needed to reproduce\n"
             "                    timeout-driven fallbacks (e.g. empty-PV bestmove fallbacks).\n"
+            "  --threads N       Send `setoption name Threads value N` at startup. Enyo logs\n"
+            "                    usually do not record the thread count the engine was launched\n"
+            "                    with, so reproducing multi-threaded pathologies requires\n"
+            "                    passing this explicitly.\n"
             "  --verbose, -v     Print full UCI traffic instead of the compact progress bar\n"
             "  --gui             Show a live board after each move\n"
             "  --help, -h        Show this help and exit\n"
@@ -341,6 +346,9 @@ int main(int argc, char* argv[]) {
             print_only = true;
         } else if (arg == "--time") {
             time_mode = true;
+        } else if (arg == "--threads" && i + 1 < argc) {
+            threads = std::stoi(argv[++i]);
+            if (threads < 1) threads = 1;
         } else if (arg == "--skip" && i + 1 < argc) {
             skip = std::stoi(argv[++i]);
             if (skip < 0) skip = 0;
@@ -541,6 +549,15 @@ int main(int argc, char* argv[]) {
 
         // Send setoptions from original game
         for (const auto& opt : setoptions) {
+            if (!quiet && !gui) fmt::print("uci:> {}\n", opt);
+            engine.send(opt);
+        }
+
+        // --threads overrides whatever the log did (or didn't) record. Sent
+        // last so it wins. Required to reproduce multi-threaded pathologies
+        // from logs that don't carry the launcher's --threads flag.
+        if (threads > 0) {
+            std::string opt = fmt::format("setoption name Threads value {}", threads);
             if (!quiet && !gui) fmt::print("uci:> {}\n", opt);
             engine.send(opt);
         }

@@ -52,8 +52,11 @@ int parseIntField(const std::string& line, const std::string& key) {
 struct TimingRecord {
     int wtime_ms;         // -1 if absent from go command
     int btime_ms;         // -1 if absent from go command
+    int winc_ms;          // -1 if absent
+    int binc_ms;          // -1 if absent
     int search_time_ms;   // -1 if no info line carried "time"
     std::string side;     // "White" or "Black" (who was to move)
+    std::string original_go;  // the exact `go ...` line from the log (for --time mode)
 };
 
 std::string extractMove(const std::string& line) {
@@ -262,6 +265,7 @@ int main(int argc, char* argv[]) {
     bool quiet = true;
     bool gui = false;
     bool print_only = false;
+    bool time_mode = false;  // --time: replay original `go wtime...` instead of `go depth N`
     int skip = 0;
     int max_moves = -1;  // -1 = replay all remaining
 
@@ -274,10 +278,17 @@ int main(int argc, char* argv[]) {
             "\n"
             "Options:\n"
             "  --engine <path>   Path to the engine binary (default: {})\n"
-            "  --skip N          Skip the first N moves in the log\n"
+            "  --skip N          Skip the first N moves in the log. NOTE: this jumps\n"
+            "                    straight to move N+1 with a fresh engine, so TT,\n"
+            "                    history, and time state do NOT match the original\n"
+            "                    run. Do not use --skip to reproduce state-dependent\n"
+            "                    bugs (fallbacks, time-management, TT-driven moves).\n"
             "  --moves N         Replay at most N moves (after skipping)\n"
             "  --count N         Alias for --moves\n"
             "  --print           Print the log's bestmoves and exit (no engine run)\n"
+            "  --time            Replay with the original `go wtime X btime Y winc Z binc W`\n"
+            "                    command from the log, not `go depth N`. Needed to reproduce\n"
+            "                    timeout-driven fallbacks (e.g. empty-PV bestmove fallbacks).\n"
             "  --verbose, -v     Print full UCI traffic instead of the compact progress bar\n"
             "  --gui             Show a live board after each move\n"
             "  --help, -h        Show this help and exit\n"
@@ -299,6 +310,8 @@ int main(int argc, char* argv[]) {
             gui = true;
         } else if (arg == "--print") {
             print_only = true;
+        } else if (arg == "--time") {
+            time_mode = true;
         } else if (arg == "--skip" && i + 1 < argc) {
             skip = std::stoi(argv[++i]);
             if (skip < 0) skip = 0;
@@ -372,6 +385,9 @@ int main(int argc, char* argv[]) {
             // Capture time-control fields from the original `go` line.
             int wtime_ms = parseIntField(line, "wtime");
             int btime_ms = parseIntField(line, "btime");
+            int winc_ms  = parseIntField(line, "winc");
+            int binc_ms  = parseIntField(line, "binc");
+            std::string original_go = line;
 
             // Scan forward for info depth lines and confirm a bestmove follows
             // before the next go/position/ucinewgame.
@@ -418,7 +434,8 @@ int main(int argc, char* argv[]) {
 
                 commands.push_back(current_position);
                 commands.push_back(fmt::format("go depth {}", depth));
-                timings.push_back({wtime_ms, btime_ms, last_time_ms, side});
+                timings.push_back({wtime_ms, btime_ms, winc_ms, binc_ms,
+                                   last_time_ms, side, original_go});
                 current_position = ""; // Clear so we don't add same position twice
             }
         }
@@ -544,16 +561,26 @@ int main(int argc, char* argv[]) {
                 current_position = cmd;
             }
 
+            // In --time mode, swap the depth-N command for the original
+            // `go wtime X btime Y ...` line recorded from the log. This
+            // reproduces the engine's hard-time behavior, which is the only
+            // way to trigger timeout-driven fallbacks (empty-PV bestmove).
+            std::string send_cmd = cmd;
             if (cmd.find("go ") != std::string::npos) {
+                if (time_mode
+                 && bestmoveIndex < (int)timings.size()
+                 && !timings[bestmoveIndex].original_go.empty()) {
+                    send_cmd = timings[bestmoveIndex].original_go;
+                }
                 if (!quiet && !gui) {
                     fmt::print("[{}/{}] ", skip + bestmoveIndex + 1, total_moves);
                 }
             }
 
             if (!quiet && !gui) {
-                fmt::print("uci:> {}\n", cmd);
+                fmt::print("uci:> {}\n", send_cmd);
             }
-            engine.send(cmd);
+            engine.send(send_cmd);
 
             if (cmd.find("go ") != std::string::npos) {
                 std::string expected_preview = (bestmoveIndex < bestmoves.size()) ? bestmoves[bestmoveIndex] : "";

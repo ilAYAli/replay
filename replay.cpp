@@ -4,8 +4,10 @@
 #include <vector>
 #include <cstdio>
 #include <cmath>
+#include <chrono>
 #include <memory>
 #include <array>
+#include <poll.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -144,6 +146,16 @@ public:
         fprintf(engine_in, "%s\n", cmd.c_str());
     }
 
+    // Block up to timeout_ms waiting for engine output. Returns true if data
+    // is readable, false on timeout. Used by the thinking-line countdown in
+    // --time mode so the UI can tick even when the engine is silent.
+    bool waitReadable(int timeout_ms) {
+        int fd = fileno(engine_out);
+        struct pollfd pfd{fd, POLLIN, 0};
+        int rc = poll(&pfd, 1, timeout_ms);
+        return rc > 0 && (pfd.revents & POLLIN);
+    }
+
     std::string readLine() {
         char buffer[8192];
         if (fgets(buffer, sizeof(buffer), engine_out)) {
@@ -156,7 +168,7 @@ public:
         return "";
     }
 
-    std::string waitForBestmove(int move_num, int total_moves, const std::string& current_position, const std::string& expected = "") {
+    std::string waitForBestmove(int move_num, int total_moves, const std::string& current_position, const std::string& expected = "", int budget_ms = -1) {
         std::string line;
         int current_depth = 0;
         int current_score = 0;
@@ -175,7 +187,45 @@ public:
         std::string side = (move_count % 2 == 0) ? "White" : "Black";
         int stm_sign = (move_count % 2 == 0) ? +1 : -1;  // engine score is from side-to-move POV
 
+        // State used for the thinking-line countdown in --time mode. We
+        // remember the last eval/depth so a tick-driven repaint (when the
+        // engine is silent) can show the same fields as an info-driven one.
+        auto t_start = std::chrono::steady_clock::now();
+        std::string last_eval_str = "  0.00";
+        auto paint_thinking = [&](double wdl) {
+            if (!quiet && !gui) return;
+            int progress_pct = (move_num * 100) / total_moves;
+            std::string expecting = expected.empty() ? "" : fmt::format(" | expecting {}", expected);
+            std::string countdown;
+            if (budget_ms > 0) {
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t_start).count();
+                countdown = fmt::format(" | {:5.1f}s/{:.1f}s",
+                                        elapsed_ms / 1000.0, budget_ms / 1000.0);
+            }
+            if (gui) {
+                fmt::print("\033[s\033[24;1H\033[K");
+                fmt::print("{} thinking | Move {}/{} | Depth {} | Eval {} | WDL {:+.2f} [{}%]{}{}",
+                           side, move_num, total_moves, current_depth, last_eval_str,
+                           wdl, progress_pct, countdown, expecting);
+                fmt::print("\033[u");
+            } else {
+                fmt::print("\r\033[K{} thinking [{:2}/{:2}] depth {:2} eval {:>6} | WDL {:+.2f} [{:3}%]{}{}",
+                           side, move_num, total_moves, current_depth, last_eval_str,
+                           wdl, progress_pct, countdown, expecting);
+            }
+            fflush(stdout);
+        };
+
         while (true) {
+            // Tick the thinking line every 1s even if the engine is silent,
+            // so stalls are visible in --time mode. Without a budget, fall
+            // back to a plain blocking read (no countdown needed).
+            if (budget_ms > 0) {
+                while (!waitReadable(1000)) {
+                    paint_thinking(final_wdl);
+                }
+            }
             line = readLine();
             if (line.empty()) break;
 
@@ -210,31 +260,10 @@ public:
                 }
                 final_wdl = wdl;
 
-                // Update progress bar
-                int progress_pct = (move_num * 100) / total_moves;
-
-                // Eval in White-POV pawns / mate distance (so sign agrees with WDL).
-                std::string eval_str = is_mate
+                last_eval_str = is_mate
                     ? fmt::format("M{:+d}", final_score * stm_sign)
                     : fmt::format("{:+.2f}", (current_score * stm_sign) / 100.0);
-
-                std::string expecting = expected.empty() ? "" : fmt::format(" | expecting {}", expected);
-
-                if (gui) {
-                    fmt::print("\033[s");  // Save cursor
-                    fmt::print("\033[24;1H");  // Move to line 24
-                    fmt::print("\033[K");  // Clear line
-
-                    fmt::print("{} thinking | Move {}/{} | Depth {} | Eval {} | WDL {:+.2f} [{}%]{}",
-                              side, move_num, total_moves, current_depth, eval_str, wdl, progress_pct, expecting);
-
-                    fmt::print("\033[u");  // Restore cursor
-                    fflush(stdout);
-                } else if (quiet) {
-                    fmt::print("\r\033[K{} thinking [{:2}/{:2}] depth {:2} eval {:>6} | WDL {:+.2f} [{:3}%]{}",
-                              side, move_num, total_moves, current_depth, eval_str, wdl, progress_pct, expecting);
-                    fflush(stdout);
-                }
+                paint_thinking(wdl);
             }
 
             // Filter output
@@ -584,7 +613,15 @@ int main(int argc, char* argv[]) {
 
             if (cmd.find("go ") != std::string::npos) {
                 std::string expected_preview = (bestmoveIndex < bestmoves.size()) ? bestmoves[bestmoveIndex] : "";
-                std::string result = engine.waitForBestmove(skip + bestmoveIndex + 1, total_moves, current_position, expected_preview);
+                // Pass the side's remaining clock as the budget in --time mode
+                // so the thinking line can show a live countdown. The engine
+                // enforces its own hard-time; budget here is cosmetic only.
+                int budget_ms = -1;
+                if (time_mode && bestmoveIndex < (int)timings.size()) {
+                    const auto& t = timings[bestmoveIndex];
+                    budget_ms = (t.side == "White") ? t.wtime_ms : t.btime_ms;
+                }
+                std::string result = engine.waitForBestmove(skip + bestmoveIndex + 1, total_moves, current_position, expected_preview, budget_ms);
 
                 // Parse bestmove|score|wdl|mate_in format
                 std::vector<std::string> parts;

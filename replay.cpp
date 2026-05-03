@@ -200,7 +200,6 @@ public:
         std::string last_eval_str = "  0.00";
         auto paint_thinking = [&](double wdl) {
             if (!quiet && !gui) return;
-            int progress_pct = (move_num * 100) / total_moves;
             std::string expecting = expected.empty() ? "" : fmt::format(" | expecting {}", expected);
             std::string countdown;
             if (budget_ms > 0) {
@@ -211,14 +210,14 @@ public:
             }
             if (gui) {
                 fmt::print("\033[s\033[24;1H\033[K");
-                fmt::print("{} thinking | Move {}/{} | Depth {} | Eval {} | WDL {:+.2f} [{}%]{}{}",
+                fmt::print("{} thinking | Move {}/{} | Depth {} | Eval {} | WDL {:+.2f}{}{}",
                            side, move_num, total_moves, current_depth, last_eval_str,
-                           wdl, progress_pct, countdown, expecting);
+                           wdl, countdown, expecting);
                 fmt::print("\033[u");
             } else {
-                fmt::print("\r\033[K{} thinking [{:2}/{:2}] depth {:2} eval {:>6} | WDL {:+.2f} [{:3}%]{}{}",
+                fmt::print("\r\033[K{} thinking [{:2}/{:2}] depth {:2} eval {:>6} | WDL {:+.2f}{}{}",
                            side, move_num, total_moves, current_depth, last_eval_str,
-                           wdl, progress_pct, countdown, expecting);
+                           wdl, countdown, expecting);
             }
             fflush(stdout);
         };

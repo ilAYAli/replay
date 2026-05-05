@@ -1,5 +1,8 @@
-#include <iostream>
+#include <algorithm>
+#include <cstdlib>
 #include <fstream>
+#include <future>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -12,6 +15,8 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <fmt/format.h>
+
+#include "validator.hpp"
 
 int extractDepth(const std::string& line) {
     size_t depthPos = line.find("depth");
@@ -60,6 +65,62 @@ struct TimingRecord {
     std::string side;     // "White" or "Black" (who was to move)
     std::string original_go;  // the exact `go ...` line from the log (for --time mode)
 };
+
+struct ValidationStats {
+    int count = 0;
+    int failures = 0;
+    int quality_total = 0;
+    int worst_quality = 100;
+    int worst_move_no = 0;
+    std::string worst_move;
+    std::string worst_label;
+};
+
+int moveCountFromPosition(const std::string& position) {
+    size_t moves_pos = position.find(" moves ");
+    if (moves_pos == std::string::npos)
+        return 0;
+
+    size_t start = moves_pos + 7;
+    if (start >= position.size())
+        return 0;
+
+    std::string moves = position.substr(start);
+    return (int)std::count(moves.begin(), moves.end(), ' ') + 1;
+}
+
+int baseSideToMoveSign(const std::string& position) {
+    std::string prefix = "position fen ";
+    if (position.rfind(prefix, 0) != 0)
+        return +1;
+
+    size_t board_end = position.find(' ', prefix.size());
+    if (board_end == std::string::npos || board_end + 1 >= position.size())
+        return +1;
+
+    if (position[board_end + 1] == 'b')
+        return -1;
+    return +1;
+}
+
+int sideToMoveSign(const std::string& position) {
+    int sign = baseSideToMoveSign(position);
+    if (moveCountFromPosition(position) % 2 != 0)
+        sign = -sign;
+    return sign;
+}
+
+std::string sideToMoveName(const std::string& position) {
+    return sideToMoveSign(position) == +1 ? "White" : "Black";
+}
+
+std::string appendMoveToPosition(const std::string& position, const std::string& move) {
+    if (move.empty() || move == "(none)")
+        return position;
+    if (position.find(" moves ") != std::string::npos)
+        return position + " " + move;
+    return position + " moves " + move;
+}
 
 std::string extractMove(const std::string& line) {
     size_t bestMovePos = line.find("bestmove ");
@@ -113,7 +174,7 @@ public:
             close(pipe_from_engine[0]);
             close(pipe_from_engine[1]);
 
-            execl(engine_path.c_str(), engine_path.c_str(), nullptr);
+            execlp(engine_path.c_str(), engine_path.c_str(), nullptr);
             exit(1);
         }
 
@@ -183,15 +244,8 @@ public:
         bool is_mate = false;
         int mate_sign = 0;
 
-        // Determine side to move from position (count moves in move list)
-        size_t moves_pos = current_position.find("moves ");
-        int move_count = 0;
-        if (moves_pos != std::string::npos) {
-            std::string moves_str = current_position.substr(moves_pos + 6);
-            move_count = std::count(moves_str.begin(), moves_str.end(), ' ') + 1;
-        }
-        std::string side = (move_count % 2 == 0) ? "White" : "Black";
-        int stm_sign = (move_count % 2 == 0) ? +1 : -1;  // engine score is from side-to-move POV
+        std::string side = sideToMoveName(current_position);
+        int stm_sign = sideToMoveSign(current_position);  // engine score is from side-to-move POV
 
         // State used for the thinking-line countdown in --time mode. We
         // remember the last eval/depth so a tick-driven repaint (when the
@@ -280,7 +334,7 @@ public:
             }
 
             if (should_print && !quiet && !gui) {
-                std::cout << line << std::endl;
+                fmt::print("{}\n", line);
             }
 
             if (line.find("bestmove ") == 0) {
@@ -291,15 +345,74 @@ public:
         }
         return "";
     }
+
+    void printPgn() {
+        send("pgn");
+        send("isready");
+        while (true) {
+            if (!waitReadable(30000))
+                throw std::runtime_error("Timed out waiting for PGN output");
+
+            std::string line = readLine();
+            if (line == "readyok")
+                break;
+            fmt::print("{}\n", line);
+        }
+    }
 };
+
+void waitForUciToken(EngineProcess& engine, const std::string& token, bool verbose) {
+    while (true) {
+        if (!engine.waitReadable(30000))
+            throw std::runtime_error(fmt::format("Timed out waiting for {}", token));
+        std::string line = engine.readLine();
+        if (line.empty())
+            continue;
+        if (verbose)
+            fmt::print("{}\n", line);
+        if (line == token)
+            break;
+    }
+}
+
+void initializeUciEngine(EngineProcess& engine, bool verbose) {
+    engine.send("uci");
+    waitForUciToken(engine, "uciok", verbose);
+}
+
+void waitForReady(EngineProcess& engine, bool verbose) {
+    engine.send("isready");
+    waitForUciToken(engine, "readyok", verbose);
+}
+
+bool isFenLine(const std::string& line) {
+    return line.find("Fen:") != std::string::npos || line.find("FEN:") != std::string::npos;
+}
+
+void printBoard(EngineProcess& engine) {
+    engine.send("d");
+    while (true) {
+        if (!engine.waitReadable(30000))
+            throw std::runtime_error("Timed out waiting for board output");
+
+        std::string line = engine.readLine();
+        fmt::print("{}\n", line);
+        if (isFenLine(line))
+            break;
+    }
+}
 
 int main(int argc, char* argv[]) {
     std::string logfile = "/tmp/enyo.log";
     std::string engine_path = std::string(getenv("HOME")) + "/code/cpp/chess/enyo/build/enyo";
+    std::string validator_path = "stockfish";
     bool quiet = true;
     bool gui = false;
     bool print_only = false;
+    bool print_pgn = false;
     bool time_mode = false;  // --time: replay original `go wtime...` instead of `go depth N`
+    bool validate = false;
+    bool color = false;
     int threads = -1;    // -1 = don't send setoption; otherwise override engine default
     int skip = 0;
     int max_moves = -1;  // -1 = replay all remaining
@@ -321,6 +434,7 @@ int main(int argc, char* argv[]) {
             "  --moves N         Replay at most N moves (after skipping)\n"
             "  --count N         Alias for --moves\n"
             "  --print           Print the log's bestmoves and exit (no engine run)\n"
+            "  --pgn             Print PGN for the replayed logged moves at the end\n"
             "  --time            Replay with the original `go wtime X btime Y winc Z binc W`\n"
             "                    command from the log, not `go depth N`. Needed to reproduce\n"
             "                    timeout-driven fallbacks (e.g. empty-PV bestmove fallbacks).\n"
@@ -328,12 +442,16 @@ int main(int argc, char* argv[]) {
             "                    usually do not record the thread count the engine was launched\n"
             "                    with, so reproducing multi-threaded pathologies requires\n"
             "                    passing this explicitly.\n"
+            "  --validate        Validate each logged move with Stockfish at the logged depth\n"
+            "  --validator <path>\n"
+            "                    UCI validator engine for --validate (default: {})\n"
+            "  --color           Colorize score percentages\n"
             "  --verbose, -v     Print full UCI traffic instead of the compact progress bar\n"
             "  --gui             Show a live board after each move\n"
             "  --help, -h        Show this help and exit\n"
             "\n"
             "Defaults logfile: {}\n",
-            prog, engine_path, logfile);
+            prog, engine_path, validator_path, logfile);
     };
 
     for (int i = 1; i < argc; i++) {
@@ -349,8 +467,17 @@ int main(int argc, char* argv[]) {
             gui = true;
         } else if (arg == "--print") {
             print_only = true;
+        } else if (arg == "--pgn") {
+            print_pgn = true;
         } else if (arg == "--time") {
             time_mode = true;
+        } else if (arg == "--validate") {
+            validate = true;
+        } else if (arg == "--color") {
+            color = true;
+        } else if ((arg == "--validator" || arg == "--validate-engine") && i + 1 < argc) {
+            validate = true;
+            validator_path = argv[++i];
         } else if (arg == "--threads" && i + 1 < argc) {
             threads = std::stoi(argv[++i]);
             if (threads < 1) threads = 1;
@@ -371,7 +498,7 @@ int main(int argc, char* argv[]) {
 
     std::ifstream file(logfile);
     if (!file.is_open()) {
-        std::cerr << "Failed to open logfile: " << logfile << std::endl;
+        fmt::print(stderr, "Failed to open logfile: {}\n", logfile);
         return 1;
     }
 
@@ -465,14 +592,7 @@ int main(int argc, char* argv[]) {
                 // (engine fallback / forced move). Replay with depth 1 so the
                 // go/bestmove count stays in lockstep with the log.
                 if (depth <= 0) depth = 1;
-                // Determine side-to-move from the position's moves list.
-                size_t mp = current_position.find("moves ");
-                int mc = 0;
-                if (mp != std::string::npos) {
-                    std::string ms = current_position.substr(mp + 6);
-                    mc = std::count(ms.begin(), ms.end(), ' ') + 1;
-                }
-                std::string side = (mc % 2 == 0) ? "White" : "Black";
+                std::string side = sideToMoveName(current_position);
 
                 commands.push_back(current_position);
                 commands.push_back(fmt::format("go depth {}", depth));
@@ -544,13 +664,7 @@ int main(int argc, char* argv[]) {
     try {
         EngineProcess engine(engine_path, quiet, gui);
 
-        // Wait for uciok
-        engine.send("uci");
-        while (true) {
-            line = engine.readLine();
-            if (!quiet && !gui) std::cout << line << std::endl;
-            if (line == "uciok") break;
-        }
+        initializeUciEngine(engine, !quiet && !gui);
 
         // Send setoptions from original game
         for (const auto& opt : setoptions) {
@@ -567,10 +681,19 @@ int main(int argc, char* argv[]) {
             engine.send(opt);
         }
 
+        std::unique_ptr<ValidatorWorker> validator;
+        if (validate) {
+            if (!quiet && !gui)
+                fmt::print("Using validator: {}\n", validator_path);
+            validator = std::make_unique<ValidatorWorker>(validator_path);
+        }
+
         int bestmoveIndex = 0;
         int commandIndex = 0;
         int totalCommands = commands.size();
         std::string current_position = "";
+        std::string pgn_position = "";
+        ValidationStats validation_stats;
 
         int mismatches = 0;
         double min_wdl = 0.0;   // worst for White
@@ -592,16 +715,7 @@ int main(int argc, char* argv[]) {
             }
 
             fmt::print("\033[2J\033[H");  // Clear screen
-            engine.send("d");
-            while (true) {
-                line = engine.readLine();
-                if (line.empty() || line.find("Fen:") != std::string::npos) {
-                    fmt::print("{}\n", line);
-                    if (line.find("Fen:") != std::string::npos) break;
-                } else {
-                    fmt::print("{}\n", line);
-                }
-            }
+            printBoard(engine);
             fmt::print("\n");
         }
 
@@ -617,11 +731,19 @@ int main(int argc, char* argv[]) {
             // reproduces the engine's hard-time behavior, which is the only
             // way to trigger timeout-driven fallbacks (empty-PV bestmove).
             std::string send_cmd = cmd;
+            std::string expected_preview;
+            std::future<MoveValidation> pending_validation;
+            int pending_validation_depth = -1;
             if (cmd.find("go ") != std::string::npos) {
                 if (time_mode
                  && bestmoveIndex < (int)timings.size()
                  && !timings[bestmoveIndex].original_go.empty()) {
                     send_cmd = timings[bestmoveIndex].original_go;
+                }
+                expected_preview = (bestmoveIndex < bestmoves.size()) ? bestmoves[bestmoveIndex] : "";
+                if (validate && validator && !expected_preview.empty()) {
+                    pending_validation_depth = std::max(1, parseIntField(cmd, "depth"));
+                    pending_validation = validator->submit(current_position, expected_preview, pending_validation_depth);
                 }
                 if (!quiet && !gui) {
                     fmt::print("[{}/{}] ", skip + bestmoveIndex + 1, total_moves);
@@ -634,7 +756,6 @@ int main(int argc, char* argv[]) {
             engine.send(send_cmd);
 
             if (cmd.find("go ") != std::string::npos) {
-                std::string expected_preview = (bestmoveIndex < bestmoves.size()) ? bestmoves[bestmoveIndex] : "";
                 // Pass the side's remaining clock as the budget in --time mode
                 // so the thinking line can show a live countdown. The engine
                 // enforces its own hard-time; budget here is cosmetic only.
@@ -664,6 +785,8 @@ int main(int argc, char* argv[]) {
                 }
 
                 std::string expected = bestmoves[bestmoveIndex++];
+                int move_no = skip + bestmoveIndex;
+                pgn_position = appendMoveToPosition(current_position, expected);
 
                 // Track summary stats
                 had_any_move = true;
@@ -673,24 +796,47 @@ int main(int argc, char* argv[]) {
                 final_wdl = wdl;
                 final_is_mate = (mate_in != 0);
                 final_mate_in = mate_in;
-                // Side that just moved: opposite of side-to-move in current_position
-                size_t mp = current_position.find("moves ");
-                int mc = 0;
-                if (mp != std::string::npos) {
-                    std::string ms = current_position.substr(mp + 6);
-                    mc = std::count(ms.begin(), ms.end(), ' ') + 1;
-                }
-                final_side = (mc % 2 == 0) ? "White" : "Black";
+                final_side = sideToMoveName(current_position);
 
                 if (quiet) {
                     fmt::print("\r\033[K");  // Clear the in-progress "thinking" line
                 }
 
+                MoveValidation move_validation;
+                if (validate && pending_validation.valid()) {
+                    if (quiet && !gui
+                     && pending_validation.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+                        fmt::print("\r\033[KSF validating [{:2}/{:2}] depth {:2}",
+                                   move_no, total_moves, pending_validation_depth);
+                        fflush(stdout);
+                    }
+
+                    move_validation = pending_validation.get();
+
+                    if (quiet && !gui)
+                        fmt::print("\r\033[K");
+
+                    if (move_validation.ok) {
+                        validation_stats.count++;
+                        validation_stats.quality_total += move_validation.quality;
+                        if (move_validation.quality < validation_stats.worst_quality) {
+                            validation_stats.worst_quality = move_validation.quality;
+                            validation_stats.worst_move_no = move_no;
+                            validation_stats.worst_move = expected;
+                            validation_stats.worst_label = move_validation.label;
+                        }
+                    } else {
+                        validation_stats.failures++;
+                    }
+                }
+
                 std::string move_line = (bestmove != expected)
                     ? fmt::format("[{}/{}] bestmove {} (EXPECTED: {}) | WDL {:+.2f}",
-                                  skip + bestmoveIndex, total_moves, bestmove, expected, wdl)
+                                  move_no, total_moves, bestmove, expected, wdl)
                     : fmt::format("[{}/{}] bestmove {} | WDL {:+.2f}",
-                                  skip + bestmoveIndex, total_moves, bestmove, wdl);
+                                  move_no, total_moves, bestmove, wdl);
+                if (validate)
+                    move_line += formatValidation(move_validation, color);
 
                 if (!gui) {
                     fmt::print("{}\n", move_line);
@@ -699,29 +845,13 @@ int main(int argc, char* argv[]) {
                 // Show board after move in gui mode
                 if (gui) {
                     fmt::print("\033[2J\033[H");  // Clear screen and move to top
-                    engine.send("d");
-                    // Read board output
-                    while (true) {
-                        line = engine.readLine();
-                        if (line.empty() || line.find("Fen:") != std::string::npos) {
-                            fmt::print("{}\n", line);
-                            if (line.find("Fen:") != std::string::npos) break;
-                        } else {
-                            fmt::print("{}\n", line);
-                        }
-                    }
+                    printBoard(engine);
                     fmt::print("\n{}\n", move_line);
                 }
             }
         }
 
-        engine.send("d");
-        while (true) {
-            line = engine.readLine();
-            if (line.empty()) break;
-            std::cout << line << std::endl;
-            if (line.find("FEN:") != std::string::npos) break;
-        }
+        printBoard(engine);
 
         if (had_any_move) {
             auto wdl_label = [](double w) {
@@ -753,6 +883,20 @@ int main(int argc, char* argv[]) {
                            winner, plies, plies == 1 ? "ply" : "plies");
             }
 
+            if (validate) {
+                if (validation_stats.count > 0) {
+                    double avg_quality = validation_stats.quality_total / (double)validation_stats.count;
+                    fmt::print("SF score           : avg {}, worst {}\n",
+                               formatQualityPercent(avg_quality, color),
+                               formatQualityPercent(validation_stats.worst_quality, color));
+                    fmt::print("Worst SF move      : {}. {} ({})\n",
+                               validation_stats.worst_move_no, validation_stats.worst_move,
+                               validation_stats.worst_label);
+                }
+                if (validation_stats.failures > 0)
+                    fmt::print("SF failures        : {}\n", validation_stats.failures);
+            }
+
             // Time-overrun check: flag moves whose search time met or exceeded
             // the side's remaining clock at the start of the `go` command.
             std::vector<std::pair<int, const TimingRecord*>> overruns;
@@ -774,8 +918,14 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        if (print_pgn && !pgn_position.empty()) {
+            fmt::print("\n=== PGN ===\n");
+            engine.send(pgn_position);
+            engine.printPgn();
+        }
+
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        fmt::print(stderr, "Error: {}\n", e.what());
         return 1;
     }
 

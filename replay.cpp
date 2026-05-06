@@ -429,7 +429,7 @@ void printBoard(EngineProcess& engine) {
 }
 
 int main(int argc, char* argv[]) {
-    std::string logfile = "/tmp/enyo.log";
+    std::string logfile = "";  // Must be specified by user
     std::string engine_path = "enyo";  // Search in PATH by default
     std::string reference_path = "stockfish";
     bool quiet = true;
@@ -475,10 +475,8 @@ int main(int argc, char* argv[]) {
             "  --color             Colorize score percentages\n"
             "  --verbose, -v       Print full UCI traffic instead of the compact progress bar\n"
             "  --gui               Show a live board after each move\n"
-            "  --help, -h          Show this help and exit\n"
-            "\n"
-            "Defaults logfile: {}\n",
-            prog, logfile);
+            "  --help, -h          Show this help and exit\n",
+            prog);
     };
 
     for (int i = 1; i < argc; i++) {
@@ -524,9 +522,15 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (logfile.empty()) {
+        fmt::print(stderr, "ERROR: No logfile specified\n\n");
+        print_help(argv[0]);
+        return 1;
+    }
+
     std::ifstream file(logfile);
     if (!file.is_open()) {
-        fmt::print(stderr, "Failed to open logfile: {}\n", logfile);
+        fmt::print(stderr, "ERROR: Failed to open logfile: {}\n", logfile);
         return 1;
     }
 

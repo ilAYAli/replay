@@ -430,7 +430,7 @@ void printBoard(EngineProcess& engine) {
 
 int main(int argc, char* argv[]) {
     std::string logfile = "/tmp/enyo.log";
-    std::string engine_path = std::string(getenv("HOME")) + "/code/cpp/chess/enyo/build/enyo";
+    std::string engine_path = "enyo";  // Search in PATH by default
     std::string reference_path = "stockfish";
     bool quiet = true;
     bool gui = false;
@@ -451,7 +451,7 @@ int main(int argc, char* argv[]) {
             "comparing the candidate engine's current bestmoves against the logged ones.\n"
             "\n"
             "Options:\n"
-            "  --candidate <path>  Path to the candidate engine binary (default: {})\n"
+            "  --candidate <path>  Path to the candidate engine binary (default: enyo)\n"
             "  --reference <path>  Reference engine for validation (default: stockfish)\n"
             "                      Validates each replayed move at the logged depth.\n"
             "                      Scores < 50%% labeled as blunders, < 75%% as misses.\n"
@@ -478,7 +478,7 @@ int main(int argc, char* argv[]) {
             "  --help, -h          Show this help and exit\n"
             "\n"
             "Defaults logfile: {}\n",
-            prog, engine_path, logfile);
+            prog, logfile);
     };
 
     for (int i = 1; i < argc; i++) {
@@ -684,8 +684,25 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    // Check if candidate engine exists
+    bool engine_found = false;
+    if (engine_path.find('/') != std::string::npos) {
+        // Absolute or relative path
+        engine_found = (access(engine_path.c_str(), X_OK) == 0);
+    } else {
+        // Check if it's in PATH using 'which'
+        std::string check_cmd = fmt::format("which {} >/dev/null 2>&1", engine_path);
+        engine_found = (system(check_cmd.c_str()) == 0);
+    }
+    
+    if (!engine_found) {
+        fmt::print(stderr, "ERROR: Candidate engine '{}' not found or not executable\n", engine_path);
+        fmt::print(stderr, "Please install Enyo or specify a different candidate engine with --candidate <path>\n");
+        return 1;
+    }
+
     if (!quiet && !gui) {
-        fmt::print("Using engine: {}\n", engine_path);
+        fmt::print("Using candidate engine: {}\n", engine_path);
         fmt::print("Total moves to replay: {}\n\n", bestmoves.size());
     }
 

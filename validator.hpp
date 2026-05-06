@@ -9,6 +9,8 @@ struct MoveValidation {
     std::string error;
     int quality = 0;
     std::string label;
+    std::string best_move;  // Stockfish's preferred move
+    int cp_loss = 0;        // Centipawn loss (how much worse the move is)
 };
 
 std::string formatQualityPercent(int quality, bool color);

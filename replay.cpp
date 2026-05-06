@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <future>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -389,6 +390,31 @@ bool isFenLine(const std::string& line) {
     return line.find("Fen:") != std::string::npos || line.find("FEN:") != std::string::npos;
 }
 
+std::string getFen(EngineProcess& engine) {
+    engine.send("d");
+    while (true) {
+        if (!engine.waitReadable(30000))
+            throw std::runtime_error("Timed out waiting for FEN");
+
+        std::string line = engine.readLine();
+        if (isFenLine(line)) {
+            // Extract FEN from line like "Fen: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+            size_t pos = line.find("Fen:");
+            if (pos == std::string::npos)
+                pos = line.find("FEN:");
+            if (pos != std::string::npos) {
+                std::string fen = line.substr(pos + 4);
+                // Trim leading whitespace
+                size_t start = fen.find_first_not_of(" \t");
+                if (start != std::string::npos)
+                    fen = fen.substr(start);
+                return fen;
+            }
+            return "";
+        }
+    }
+}
+
 void printBoard(EngineProcess& engine) {
     engine.send("d");
     while (true) {
@@ -405,13 +431,13 @@ void printBoard(EngineProcess& engine) {
 int main(int argc, char* argv[]) {
     std::string logfile = "/tmp/enyo.log";
     std::string engine_path = std::string(getenv("HOME")) + "/code/cpp/chess/enyo/build/enyo";
-    std::string validator_path = "stockfish";
+    std::string reference_path = "stockfish";
     bool quiet = true;
     bool gui = false;
     bool print_only = false;
     bool print_pgn = false;
     bool time_mode = false;  // --time: replay original `go wtime...` instead of `go depth N`
-    bool validate = false;
+    bool validate = true;   // Validate by default if reference engine is found
     bool color = false;
     int threads = -1;    // -1 = don't send setoption; otherwise override engine default
     int skip = 0;
@@ -422,36 +448,37 @@ int main(int argc, char* argv[]) {
             "Usage: {} [options] <logfile>\n"
             "\n"
             "Replays the UCI go/bestmove pairs from an Enyo engine logfile,\n"
-            "comparing the engine's current bestmoves against the logged ones.\n"
+            "comparing the candidate engine's current bestmoves against the logged ones.\n"
             "\n"
             "Options:\n"
-            "  --engine <path>   Path to the engine binary (default: {})\n"
-            "  --skip N          Skip the first N moves in the log. NOTE: this jumps\n"
-            "                    straight to move N+1 with a fresh engine, so TT,\n"
-            "                    history, and time state do NOT match the original\n"
-            "                    run. Do not use --skip to reproduce state-dependent\n"
-            "                    bugs (fallbacks, time-management, TT-driven moves).\n"
-            "  --moves N         Replay at most N moves (after skipping)\n"
-            "  --count N         Alias for --moves\n"
-            "  --print           Print the log's bestmoves and exit (no engine run)\n"
-            "  --pgn             Print PGN for the replayed logged moves at the end\n"
-            "  --time            Replay with the original `go wtime X btime Y winc Z binc W`\n"
-            "                    command from the log, not `go depth N`. Needed to reproduce\n"
-            "                    timeout-driven fallbacks (e.g. empty-PV bestmove fallbacks).\n"
-            "  --threads N       Send `setoption name Threads value N` at startup. Enyo logs\n"
-            "                    usually do not record the thread count the engine was launched\n"
-            "                    with, so reproducing multi-threaded pathologies requires\n"
-            "                    passing this explicitly.\n"
-            "  --validate        Validate each logged move with Stockfish at the logged depth\n"
-            "  --validator <path>\n"
-            "                    UCI validator engine for --validate (default: {})\n"
-            "  --color           Colorize score percentages\n"
-            "  --verbose, -v     Print full UCI traffic instead of the compact progress bar\n"
-            "  --gui             Show a live board after each move\n"
-            "  --help, -h        Show this help and exit\n"
+            "  --candidate <path>  Path to the candidate engine binary (default: {})\n"
+            "  --reference <path>  Reference engine for validation (default: stockfish)\n"
+            "                      Validates each replayed move at the logged depth.\n"
+            "                      Scores < 50%% labeled as blunders, < 75%% as misses.\n"
+            "  --no-validate       Disable validation even if reference engine is available\n"
+            "  --skip N            Skip the first N moves in the log. NOTE: this jumps\n"
+            "                      straight to move N+1 with a fresh engine, so TT,\n"
+            "                      history, and time state do NOT match the original\n"
+            "                      run. Do not use --skip to reproduce state-dependent\n"
+            "                      bugs (fallbacks, time-management, TT-driven moves).\n"
+            "  --moves N           Replay at most N moves (after skipping)\n"
+            "  --count N           Alias for --moves\n"
+            "  --print             Print the log's bestmoves and exit (no engine run)\n"
+            "  --pgn               Print PGN for the replayed logged moves at the end\n"
+            "  --time              Replay with the original `go wtime X btime Y winc Z binc W`\n"
+            "                      command from the log, not `go depth N`. Needed to reproduce\n"
+            "                      timeout-driven fallbacks (e.g. empty-PV bestmove fallbacks).\n"
+            "  --threads N         Send `setoption name Threads value N` at startup. Enyo logs\n"
+            "                      usually do not record the thread count the engine was launched\n"
+            "                      with, so reproducing multi-threaded pathologies requires\n"
+            "                      passing this explicitly.\n"
+            "  --color             Colorize score percentages\n"
+            "  --verbose, -v       Print full UCI traffic instead of the compact progress bar\n"
+            "  --gui               Show a live board after each move\n"
+            "  --help, -h          Show this help and exit\n"
             "\n"
             "Defaults logfile: {}\n",
-            prog, engine_path, validator_path, logfile);
+            prog, engine_path, logfile);
     };
 
     for (int i = 1; i < argc; i++) {
@@ -459,8 +486,14 @@ int main(int argc, char* argv[]) {
         if (arg == "--help" || arg == "-h") {
             print_help(argv[0]);
             return 0;
-        } else if (arg == "--engine" && i + 1 < argc) {
+        } else if ((arg == "--candidate" || arg == "--engine") && i + 1 < argc) {
             engine_path = argv[++i];
+        } else if ((arg == "--reference" || arg == "--validator") && i + 1 < argc) {
+            reference_path = argv[++i];
+        } else if (arg == "--no-validate") {
+            validate = false;
+        } else if (arg == "--validate") {
+            validate = true;  // Keep for backward compatibility
         } else if (arg == "--verbose" || arg == "-v") {
             quiet = false;
         } else if (arg == "--gui") {
@@ -471,13 +504,8 @@ int main(int argc, char* argv[]) {
             print_pgn = true;
         } else if (arg == "--time") {
             time_mode = true;
-        } else if (arg == "--validate") {
-            validate = true;
         } else if (arg == "--color") {
             color = true;
-        } else if ((arg == "--validator" || arg == "--validate-engine") && i + 1 < argc) {
-            validate = true;
-            validator_path = argv[++i];
         } else if (arg == "--threads" && i + 1 < argc) {
             threads = std::stoi(argv[++i]);
             if (threads < 1) threads = 1;
@@ -683,9 +711,26 @@ int main(int argc, char* argv[]) {
 
         std::unique_ptr<ValidatorWorker> validator;
         if (validate) {
+            // Check if validator exists - handle both absolute paths and PATH lookups
+            bool validator_found = false;
+            if (reference_path.find('/') != std::string::npos) {
+                // Absolute or relative path
+                validator_found = (access(reference_path.c_str(), X_OK) == 0);
+            } else {
+                // Check if it's in PATH using 'which'
+                std::string check_cmd = fmt::format("which {} >/dev/null 2>&1", reference_path);
+                validator_found = (system(check_cmd.c_str()) == 0);
+            }
+            
+            if (!validator_found) {
+                fmt::print(stderr, "ERROR: Reference engine '{}' not found or not executable\n", reference_path);
+                fmt::print(stderr, "Please install Stockfish or specify a different reference engine with --reference <path>\n");
+                fmt::print(stderr, "Or use --no-validate to disable validation\n");
+                return 1;
+            }
             if (!quiet && !gui)
-                fmt::print("Using validator: {}\n", validator_path);
-            validator = std::make_unique<ValidatorWorker>(validator_path);
+                fmt::print("Using reference engine: {}\n", reference_path);
+            validator = std::make_unique<ValidatorWorker>(reference_path);
         }
 
         int bestmoveIndex = 0;
@@ -732,8 +777,6 @@ int main(int argc, char* argv[]) {
             // way to trigger timeout-driven fallbacks (empty-PV bestmove).
             std::string send_cmd = cmd;
             std::string expected_preview;
-            std::future<MoveValidation> pending_validation;
-            int pending_validation_depth = -1;
             if (cmd.find("go ") != std::string::npos) {
                 if (time_mode
                  && bestmoveIndex < (int)timings.size()
@@ -741,10 +784,6 @@ int main(int argc, char* argv[]) {
                     send_cmd = timings[bestmoveIndex].original_go;
                 }
                 expected_preview = (bestmoveIndex < bestmoves.size()) ? bestmoves[bestmoveIndex] : "";
-                if (validate && validator && !expected_preview.empty()) {
-                    pending_validation_depth = std::max(1, parseIntField(cmd, "depth"));
-                    pending_validation = validator->submit(current_position, expected_preview, pending_validation_depth);
-                }
                 if (!quiet && !gui) {
                     fmt::print("[{}/{}] ", skip + bestmoveIndex + 1, total_moves);
                 }
@@ -779,6 +818,13 @@ int main(int argc, char* argv[]) {
                 double wdl = parts.size() > 2 ? std::stod(parts[2]) : 0.0;
                 int mate_in = parts.size() > 3 ? std::stoi(parts[3]) : 0;
 
+                // Submit validation for the replayed bestmove (not the logged one)
+                std::future<MoveValidation> pending_validation;
+                int validation_depth = -1;
+                if (validate && validator && !bestmove.empty()) {
+                    validation_depth = std::max(1, parseIntField(cmd, "depth"));
+                    pending_validation = validator->submit(current_position, bestmove, validation_depth);
+                }
                 if (bestmoveIndex >= bestmoves.size()) {
                     fmt::print("ERROR: No expected bestmove for position {}\n", bestmoveIndex);
                     break;
@@ -807,7 +853,7 @@ int main(int argc, char* argv[]) {
                     if (quiet && !gui
                      && pending_validation.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
                         fmt::print("\r\033[KSF validating [{:2}/{:2}] depth {:2}",
-                                   move_no, total_moves, pending_validation_depth);
+                                   move_no, total_moves, validation_depth);
                         fflush(stdout);
                     }
 
@@ -822,7 +868,7 @@ int main(int argc, char* argv[]) {
                         if (move_validation.quality < validation_stats.worst_quality) {
                             validation_stats.worst_quality = move_validation.quality;
                             validation_stats.worst_move_no = move_no;
-                            validation_stats.worst_move = expected;
+                            validation_stats.worst_move = bestmove;  // Track the replayed move
                             validation_stats.worst_label = move_validation.label;
                         }
                     } else {
@@ -840,6 +886,16 @@ int main(int argc, char* argv[]) {
 
                 if (!gui) {
                     fmt::print("{}\n", move_line);
+                    
+                    // Print FEN for blunders and misses to help with analysis
+                    if (validate && move_validation.ok && move_validation.quality < 75.0) {
+                        std::string fen = getFen(engine);
+                        fmt::print("  Position FEN: {}\n", fen);
+                        fmt::print("  CP loss: -{} (evaluation dropped by {:.2f} pawns)\n", 
+                                   move_validation.cp_loss, move_validation.cp_loss / 100.0);
+                        fmt::print("  Analyze at: https://lichess.org/analysis/{}\n", 
+                                   std::regex_replace(fen, std::regex(" "), "_"));
+                    }
                 }
 
                 // Show board after move in gui mode
@@ -850,8 +906,6 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-
-        printBoard(engine);
 
         if (had_any_move) {
             auto wdl_label = [](double w) {
@@ -891,7 +945,7 @@ int main(int argc, char* argv[]) {
                                formatQualityPercent(validation_stats.worst_quality, color));
                     fmt::print("Worst SF move      : {}. {} ({})\n",
                                validation_stats.worst_move_no, validation_stats.worst_move,
-                               validation_stats.worst_label);
+                               formatQualityPercent(validation_stats.worst_quality, color));
                 }
                 if (validation_stats.failures > 0)
                     fmt::print("SF failures        : {}\n", validation_stats.failures);

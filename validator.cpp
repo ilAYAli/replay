@@ -278,6 +278,8 @@ MoveValidation validateMove(UciProcess& validator, const std::string& position, 
         return validation;
     }
 
+    validation.best_move = before.bestmove;  // Store SF's preferred move
+
     bool stockfish_best = before.bestmove == played_move;
     if (stockfish_best) {
         validation.ok = true;
@@ -300,6 +302,7 @@ MoveValidation validateMove(UciProcess& validator, const std::string& position, 
     validation.ok = true;
     validation.quality = qualityFromLoss(loss_cp, stockfish_best);
     validation.label = qualityLabel(validation.quality);
+    validation.cp_loss = loss_cp;  // Store the centipawn loss
     return validation;
 }
 
@@ -340,7 +343,19 @@ std::string formatValidation(const MoveValidation& validation, bool color) {
     if (!validation.ok)
         return " | SF n/a";
 
-    return fmt::format(" | SF {}", formatQualityPercent(validation.quality, color));
+    std::string quality_str = formatQualityPercent(validation.quality, color);
+    
+    // Categorize based on quality percentage and show SF's preferred move for weak moves
+    if (validation.quality < 50.0) {
+        std::string sf_move = validation.best_move.empty() ? "" : fmt::format(", SF prefers {}", validation.best_move);
+        return fmt::format(" | SF {} (blunder{})", quality_str, sf_move);
+    }
+    if (validation.quality < 75.0) {
+        std::string sf_move = validation.best_move.empty() ? "" : fmt::format(", SF prefers {}", validation.best_move);
+        return fmt::format(" | SF {} (miss{})", quality_str, sf_move);
+    }
+    
+    return fmt::format(" | SF {}", quality_str);
 }
 
 class ValidatorWorker::Impl {

@@ -924,8 +924,104 @@ void printBoard(EngineProcess& engine) {
     }
 }
 
+std::string shellQuote(const std::string& value) {
+    std::string quoted = "'";
+    for (char ch : value) {
+        if (ch == '\'')
+            quoted += "'\\''";
+        else
+            quoted += ch;
+    }
+    quoted += "'";
+    return quoted;
+}
+
+bool isAnalysisIssueLine(const std::string& line) {
+    return line.rfind("inaccuracy:", 0) == 0
+        || line.rfind("mistake:", 0) == 0
+        || line.rfind("blunder:", 0) == 0;
+}
+
+int runBatchAnalysis(const std::filesystem::path& directory, int argc, char* argv[], int logfile_arg_index) {
+    std::vector<std::filesystem::path> logs;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".log")
+            logs.push_back(entry.path());
+    }
+    std::sort(logs.begin(), logs.end());
+
+    if (logs.empty()) {
+        fmt::print(stderr, "ERROR: No .log files found in {}\n", directory.string());
+        return 1;
+    }
+
+    std::filesystem::path summary_path = directory / "analysis.summary";
+    std::ofstream summary(summary_path);
+    if (!summary.is_open()) {
+        fmt::print(stderr, "ERROR: Failed to write {}\n", summary_path.string());
+        return 1;
+    }
+
+    int failures = 0;
+    int issues = 0;
+    for (size_t i = 0; i < logs.size(); ++i) {
+        const auto& log = logs[i];
+        std::filesystem::path runlog = log;
+        runlog.replace_extension(".runlog");
+
+        fmt::print("[{}/{}] {}\n", i + 1, logs.size(), log.filename().string());
+
+        std::string command = shellQuote(argv[0]);
+        for (int arg = 1; arg < argc; ++arg) {
+            if (arg == logfile_arg_index) {
+                command += " " + shellQuote(log.string());
+                continue;
+            }
+            command += " " + shellQuote(argv[arg]);
+        }
+        command += " > " + shellQuote(runlog.string()) + " 2>&1";
+
+        int rc = std::system(command.c_str());
+        if (rc != 0) {
+            failures++;
+            summary << log.filename().string() << ": ERROR: replay failed; see "
+                    << runlog.filename().string() << '\n';
+            continue;
+        }
+
+        auto runlog_text = readTextFile(runlog);
+        if (!runlog_text) {
+            failures++;
+            summary << log.filename().string() << ": ERROR: missing runlog output\n";
+            continue;
+        }
+
+        std::istringstream lines(*runlog_text);
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (!isAnalysisIssueLine(line))
+                continue;
+            summary << log.filename().string() << ": " << line << '\n';
+            issues++;
+        }
+    }
+
+    if (issues == 0 && failures == 0)
+        summary << "No inaccuracies, mistakes, or blunders.\n";
+
+    fmt::print("\n=== Batch Analysis ===\n");
+    fmt::print("Logs analyzed      : {}\n", logs.size());
+    fmt::print("Issues             : {}\n", issues);
+    if (failures > 0)
+        fmt::print("Failures           : {}\n", failures);
+    fmt::print("Summary saved      : {}\n", summary_path.string());
+
+    return failures == 0 ? 0 : 1;
+}
+
 int main(int argc, char* argv[]) {
     std::string logfile = "";  // Must be specified by user
+    int logfile_arg_index = -1;
     std::string engine_path = "enyo";  // Search in PATH by default
     std::string reference_path = "stockfish";
     bool quiet = true;
@@ -945,10 +1041,12 @@ int main(int argc, char* argv[]) {
 
     auto print_help = [&](const char* prog) {
         fmt::print(
-            "Usage: {} [options] <logfile>\n"
+            "Usage: {} [options] <logfile-or-directory>\n"
             "\n"
             "Replays the UCI go/bestmove pairs from an Enyo engine logfile,\n"
             "comparing the candidate engine's current bestmoves against the logged ones.\n"
+            "If the target is a directory, runs all *.log files and writes\n"
+            "analysis.summary with filename-prefixed issues.\n"
             "\n"
             "Options:\n"
             "  --candidate <path>  Path to the candidate engine binary (default: enyo)\n"
@@ -1038,6 +1136,7 @@ int main(int argc, char* argv[]) {
             return 1;
         } else {
             logfile = arg;
+            logfile_arg_index = i;
         }
     }
 
@@ -1063,6 +1162,14 @@ int main(int argc, char* argv[]) {
     }
     if (use_lichess_analysis)
         analysis_target = AnalysisTarget::Logged;
+
+    if (std::filesystem::is_directory(logfile)) {
+        if (!validate) {
+            fmt::print(stderr, "ERROR: directory batch analysis cannot be used with --no-analysis\n");
+            return 1;
+        }
+        return runBatchAnalysis(logfile, argc, argv, logfile_arg_index);
+    }
 
     std::ifstream file(logfile);
     if (!file.is_open()) {

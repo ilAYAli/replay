@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -942,6 +943,123 @@ bool isAnalysisIssueLine(const std::string& line) {
         || line.rfind("blunder:", 0) == 0;
 }
 
+std::string formatElapsed(std::chrono::steady_clock::duration duration) {
+    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+    if (seconds < 60)
+        return fmt::format("{}s", seconds);
+
+    auto minutes = seconds / 60;
+    seconds %= 60;
+    if (minutes < 60)
+        return fmt::format("{}m{:02}s", minutes, seconds);
+
+    auto hours = minutes / 60;
+    minutes %= 60;
+    return fmt::format("{}h{:02}m{:02}s", hours, minutes, seconds);
+}
+
+std::string stripTerminalControls(const std::string& line) {
+    std::string clean;
+    for (size_t i = 0; i < line.size(); ++i) {
+        if (line[i] != '\033') {
+            clean.push_back(line[i]);
+            continue;
+        }
+
+        i++;
+        if (i < line.size() && line[i] == '[') {
+            while (i < line.size() && !std::isalpha((unsigned char)line[i]))
+                i++;
+        }
+    }
+    return trim(clean);
+}
+
+int runBatchCommand(const std::string& command, const std::filesystem::path& runlog, const std::string& label) {
+    FILE* pipe = popen((command + " 2>&1").c_str(), "r");
+    if (!pipe)
+        return -1;
+
+    std::ofstream out(runlog);
+    if (!out.is_open()) {
+        pclose(pipe);
+        return -1;
+    }
+
+    int fd = fileno(pipe);
+    auto started = std::chrono::steady_clock::now();
+    auto last_progress = std::chrono::steady_clock::now() - std::chrono::seconds(30);
+    auto last_heartbeat = std::chrono::steady_clock::now();
+    auto process_line = [&](const std::string& raw) {
+        std::string line = stripTerminalControls(raw);
+        if (line.empty())
+            return;
+
+        bool move_line = line.find("] bestmove ") != std::string::npos;
+        bool thinking_line = line.find(" thinking [") != std::string::npos
+                          || line.find("SF analyzing [") != std::string::npos;
+        bool error_line = line.rfind("ERROR:", 0) == 0 || line.rfind("Error:", 0) == 0;
+
+        auto now = std::chrono::steady_clock::now();
+        if (move_line || error_line || (thinking_line && now - last_progress >= std::chrono::seconds(10))) {
+            fmt::print("  {}: {}\n", label, line);
+            fflush(stdout);
+            if (thinking_line)
+                last_progress = now;
+        }
+    };
+
+    std::array<char, 4096> buffer{};
+    std::string line;
+    while (true) {
+        struct pollfd pfd{fd, POLLIN | POLLHUP, 0};
+        int poll_rc = poll(&pfd, 1, 1000);
+        if (poll_rc == 0) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_heartbeat >= std::chrono::seconds(30)) {
+                fmt::print("  {}: still running ({})\n", label, formatElapsed(now - started));
+                fflush(stdout);
+                last_heartbeat = now;
+            }
+            continue;
+        }
+        if (poll_rc < 0) {
+            if (errno == EINTR)
+                continue;
+            pclose(pipe);
+            return -1;
+        }
+        if (!(pfd.revents & (POLLIN | POLLHUP)))
+            continue;
+
+        ssize_t bytes = read(fd, buffer.data(), buffer.size());
+        if (bytes == 0)
+            break;
+        if (bytes < 0) {
+            if (errno == EINTR)
+                continue;
+            pclose(pipe);
+            return -1;
+        }
+
+        out.write(buffer.data(), bytes);
+        out.flush();
+        for (ssize_t i = 0; i < bytes; ++i) {
+            char ch = buffer[i];
+            if (ch == '\n' || ch == '\r') {
+                process_line(line);
+                line.clear();
+            } else {
+                line.push_back(ch);
+            }
+        }
+    }
+    if (!line.empty())
+        process_line(line);
+
+    return pclose(pipe);
+}
+
 int runBatchAnalysis(const std::filesystem::path& directory, int argc, char* argv[], int logfile_arg_index) {
     std::vector<std::filesystem::path> logs;
     for (const auto& entry : std::filesystem::directory_iterator(directory)) {
@@ -970,6 +1088,7 @@ int runBatchAnalysis(const std::filesystem::path& directory, int argc, char* arg
         runlog.replace_extension(".runlog");
 
         fmt::print("[{}/{}] {}\n", i + 1, logs.size(), log.filename().string());
+        fflush(stdout);
 
         std::string command = shellQuote(argv[0]);
         for (int arg = 1; arg < argc; ++arg) {
@@ -979,9 +1098,12 @@ int runBatchAnalysis(const std::filesystem::path& directory, int argc, char* arg
             }
             command += " " + shellQuote(argv[arg]);
         }
-        command += " > " + shellQuote(runlog.string()) + " 2>&1";
 
-        int rc = std::system(command.c_str());
+        auto started = std::chrono::steady_clock::now();
+        int rc = runBatchCommand(command, runlog, log.filename().string());
+        fmt::print("  {}: finished in {}\n",
+                   log.filename().string(), formatElapsed(std::chrono::steady_clock::now() - started));
+        fflush(stdout);
         if (rc != 0) {
             failures++;
             summary << log.filename().string() << ": ERROR: replay failed; see "
@@ -1540,6 +1662,7 @@ int main(int argc, char* argv[]) {
 
                 if (!gui) {
                     fmt::print("{}\n", move_line);
+                    fflush(stdout);
                 }
 
                 // Show board after move in gui mode

@@ -21,6 +21,9 @@ Replay one log with `enyo` from `PATH`:
 replay "game.log"
 ```
 
+At startup, replay prints the candidate engine UCI id and initialization
+commands so the engine version and applied options are visible.
+
 The end report is saved beside the log as
 `game.<engine-tag>_replayed_analysis`. If that file already exists, replay
 reuses it and skips the log. Limited/debug runs such as `--move` and `--count`

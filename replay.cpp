@@ -6,13 +6,14 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <vector>
 #include <fmt/format.h>
 
@@ -442,10 +443,7 @@ public:
         if (pid == 0) {
             dup2(pipe_to_engine[0], STDIN_FILENO);
             dup2(pipe_from_engine[1], STDOUT_FILENO);
-
-            int devnull = open("/dev/null", O_WRONLY);
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
+            signal(SIGPIPE, SIG_DFL);
 
             close(pipe_to_engine[0]);
             close(pipe_to_engine[1]);
@@ -483,37 +481,80 @@ public:
     void send(const std::string& cmd) {
         if (verbose)
             fmt::print("uci:> {}\n", cmd);
-        fprintf(engine_in, "%s\n", cmd.c_str());
+        if (fprintf(engine_in, "%s\n", cmd.c_str()) < 0 || fflush(engine_in) == EOF)
+            throw std::runtime_error(fmt::format("engine stopped while sending command: {}", cmd));
     }
 
     bool waitReadable(int timeout_ms) {
         int fd = fileno(engine_out);
         struct pollfd pfd{fd, POLLIN, 0};
         int rc = poll(&pfd, 1, timeout_ms);
-        return rc > 0 && (pfd.revents & POLLIN);
+        return rc > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR));
     }
 
-    std::string readLine() {
+    std::optional<std::string> readLine() {
         char buffer[8192];
         if (!fgets(buffer, sizeof(buffer), engine_out))
-            return "";
+            return std::nullopt;
 
         std::string line(buffer);
         if (!line.empty() && line.back() == '\n')
             line.pop_back();
-        if (verbose && !line.empty())
+        if (verbose)
             fmt::print("{}\n", line);
         return line;
+    }
+
+    bool hasExited() {
+        if (pid <= 0)
+            return true;
+
+        int status = 0;
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc == pid) {
+            pid = -1;
+            return true;
+        }
+        return false;
     }
 };
 
 void waitForToken(EngineProcess& engine, const std::string& token) {
     while (true) {
-        if (!engine.waitReadable(30000))
+        if (!engine.waitReadable(30000)) {
+            if (engine.hasExited())
+                throw std::runtime_error(fmt::format("engine exited while waiting for {}", token));
             throw std::runtime_error(fmt::format("timed out waiting for {}", token));
+        }
 
-        std::string line = engine.readLine();
-        if (line == token)
+        auto line = engine.readLine();
+        if (!line)
+            throw std::runtime_error(fmt::format("engine closed stdout while waiting for {}", token));
+        if (*line == token)
+            return;
+    }
+}
+
+void sendInitCommand(EngineProcess& engine, const std::string& command, bool show_init) {
+    if (show_init)
+        fmt::print("> {}\n", command);
+    engine.send(command);
+}
+
+void waitForInitToken(EngineProcess& engine, const std::string& token, bool show_init) {
+    while (true) {
+        if (!engine.waitReadable(30000)) {
+            if (engine.hasExited())
+                throw std::runtime_error(fmt::format("engine exited while waiting for {}", token));
+            throw std::runtime_error(fmt::format("timed out waiting for {}", token));
+        }
+
+        auto line = engine.readLine();
+        if (!line)
+            throw std::runtime_error(fmt::format("engine closed stdout while waiting for {}", token));
+        if (show_init)
+            fmt::print("{}\n", *line);
+        if (*line == token)
             return;
     }
 }
@@ -524,13 +565,18 @@ std::string probeEngineTag(const std::string& engine_path) {
 
     std::string id_text;
     while (true) {
-        if (!engine.waitReadable(30000))
+        if (!engine.waitReadable(30000)) {
+            if (engine.hasExited())
+                throw std::runtime_error("engine exited while waiting for uciok");
             throw std::runtime_error("timed out waiting for uciok");
+        }
 
-        std::string line = engine.readLine();
-        if (startsWith(line, "id "))
-            id_text += line + " ";
-        if (line == "uciok")
+        auto line = engine.readLine();
+        if (!line)
+            throw std::runtime_error("engine closed stdout while waiting for uciok");
+        if (startsWith(*line, "id "))
+            id_text += *line + " ";
+        if (*line == "uciok")
             break;
     }
 
@@ -578,19 +624,26 @@ void writeFile(const std::filesystem::path& path, const std::string& text) {
 
 void initializeEngine(EngineProcess& engine,
                       const std::vector<std::string>& setoptions,
-                      int threads) {
-    engine.send("uci");
-    waitForToken(engine, "uciok");
+                      int threads,
+                      bool show_init) {
+    if (show_init)
+        fmt::print("\n=== Candidate UCI ===\n");
+
+    sendInitCommand(engine, "uci", show_init);
+    waitForInitToken(engine, "uciok", show_init);
 
     for (const auto& option : setoptions)
-        engine.send(option);
+        sendInitCommand(engine, option, show_init);
 
     if (threads > 0)
-        engine.send(fmt::format("setoption name Threads value {}", threads));
+        sendInitCommand(engine, fmt::format("setoption name Threads value {}", threads), show_init);
 
-    engine.send("ucinewgame");
-    engine.send("isready");
-    waitForToken(engine, "readyok");
+    sendInitCommand(engine, "ucinewgame", show_init);
+    sendInitCommand(engine, "isready", show_init);
+    waitForInitToken(engine, "readyok", show_init);
+
+    if (show_init)
+        fmt::print("\n");
 }
 
 void initializeReference(EngineProcess& engine) {
@@ -632,13 +685,13 @@ ReferenceResult referenceSearch(EngineProcess& engine,
     engine.send(fmt::format("go depth {}", std::max(1, depth)));
 
     while (true) {
-        std::string line = engine.readLine();
-        if (line.empty())
+        auto line = engine.readLine();
+        if (!line)
             throw std::runtime_error("reference engine stopped during search");
 
-        updateReferenceScore(result, line, stm_sign);
-        if (startsWith(line, "bestmove ")) {
-            result.bestmove = extractMove(line);
+        updateReferenceScore(result, *line, stm_sign);
+        if (startsWith(*line, "bestmove ")) {
+            result.bestmove = extractMove(*line);
             return result;
         }
     }
@@ -694,24 +747,26 @@ SearchResult waitForBestmove(EngineProcess& engine,
     int stm_sign = sideToMoveSign(entry.position);
 
     while (true) {
-        std::string line = engine.readLine();
-        if (line.empty())
+        auto line = engine.readLine();
+        if (!line)
             break;
+        if (line->empty())
+            continue;
 
-        if (line.find("info depth ") != std::string::npos) {
-            int depth = extractDepth(line);
-            size_t mate_pos = line.find("score mate ");
-            size_t score_pos = line.find("score cp ");
+        if (line->find("info depth ") != std::string::npos) {
+            int depth = extractDepth(*line);
+            size_t mate_pos = line->find("score mate ");
+            size_t score_pos = line->find("score cp ");
 
             if (mate_pos != std::string::npos) {
                 size_t start = mate_pos + 11;
-                size_t end = line.find(' ', start);
-                mate_in = std::stoi(line.substr(start, end == std::string::npos ? end : end - start));
+                size_t end = line->find(' ', start);
+                mate_in = std::stoi(line->substr(start, end == std::string::npos ? end : end - start));
                 wdl = mate_in >= 0 ? stm_sign : -stm_sign;
             } else if (score_pos != std::string::npos) {
                 size_t start = score_pos + 9;
-                size_t end = line.find(' ', start);
-                score = std::stoi(line.substr(start, end == std::string::npos ? end : end - start));
+                size_t end = line->find(' ', start);
+                score = std::stoi(line->substr(start, end == std::string::npos ? end : end - start));
                 mate_in = 0;
                 wdl = std::tanh((score * stm_sign) / 300.0);
             }
@@ -724,10 +779,10 @@ SearchResult waitForBestmove(EngineProcess& engine,
             }
         }
 
-        if (startsWith(line, "bestmove ")) {
+        if (startsWith(*line, "bestmove ")) {
             if (progress)
                 fmt::print("\r\033[K");
-            return {extractMove(line), wdl, mate_in};
+            return {extractMove(*line), wdl, mate_in};
         }
     }
 
@@ -874,6 +929,8 @@ int runDirectory(const std::filesystem::path& directory,
 }
 
 int main(int argc, char* argv[]) {
+    signal(SIGPIPE, SIG_IGN);
+
     std::string engine_path = "enyo";
     std::string reference_path = "stockfish";
     std::string logfile;
@@ -1068,9 +1125,12 @@ int main(int argc, char* argv[]) {
             initializeReference(*reference);
         }
 
+        bool candidate_init_shown = false;
         auto make_engine = [&] {
             auto engine = std::make_unique<EngineProcess>(engine_path, verbose);
-            initializeEngine(*engine, parsed.setoptions, threads);
+            bool show_init = !verbose && !candidate_init_shown;
+            initializeEngine(*engine, parsed.setoptions, threads, show_init);
+            candidate_init_shown = true;
             return engine;
         };
 

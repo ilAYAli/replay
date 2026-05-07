@@ -121,6 +121,11 @@ struct LichessAnalysis {
     std::map<std::pair<int, char>, LichessAdvice> advices;
 };
 
+enum class AnalysisTarget {
+    Replayed,
+    Logged
+};
+
 int moveCountFromPosition(const std::string& position) {
     size_t moves_pos = position.find(" moves ");
     if (moves_pos == std::string::npos)
@@ -932,6 +937,8 @@ int main(int argc, char* argv[]) {
     bool color = false;
     bool save_analysis = false;
     bool use_lichess_analysis = false;
+    AnalysisTarget analysis_target = AnalysisTarget::Replayed;
+    bool analysis_target_explicit = false;
     int threads = -1;    // -1 = don't send setoption; otherwise override engine default
     int skip = 0;
     int max_moves = -1;  // -1 = replay all remaining
@@ -946,10 +953,13 @@ int main(int argc, char* argv[]) {
             "Options:\n"
             "  --candidate <path>  Path to the candidate engine binary (default: enyo)\n"
             "  --reference <path>  Reference engine for local analysis (default: stockfish)\n"
-            "                      Analyzes logged moves at the end, at logged depth.\n"
+            "                      Analyzes replayed moves at the end, at logged depth.\n"
             "                      Labels inaccuracies, mistakes, and blunders using\n"
             "                      Lichess-style winning-chance loss thresholds.\n"
             "  --no-analysis       Replay only; do not generate the end analysis report\n"
+            "  --analysis-target replayed|logged\n"
+            "                      Local analysis target (default: replayed). Lichess\n"
+            "                      analysis always uses logged game moves.\n"
             "  --skip N            Skip to the first logged position after fullmove N.\n"
             "                      NOTE: this jumps straight to that move with a fresh engine, so TT,\n"
             "                      history, and time state do NOT match the original\n"
@@ -998,6 +1008,17 @@ int main(int argc, char* argv[]) {
             save_analysis = true;
         } else if (arg == "--lichess-analysis") {
             use_lichess_analysis = true;
+        } else if (arg == "--analysis-target" && i + 1 < argc) {
+            std::string target = argv[++i];
+            analysis_target_explicit = true;
+            if (target == "replayed") {
+                analysis_target = AnalysisTarget::Replayed;
+            } else if (target == "logged") {
+                analysis_target = AnalysisTarget::Logged;
+            } else {
+                fmt::print(stderr, "ERROR: --analysis-target must be 'replayed' or 'logged'\n");
+                return 1;
+            }
         } else if (arg == "--time") {
             time_mode = true;
         } else if (arg == "--color") {
@@ -1035,6 +1056,13 @@ int main(int argc, char* argv[]) {
         fmt::print(stderr, "ERROR: --lichess-analysis cannot be used with --no-analysis\n");
         return 1;
     }
+
+    if (use_lichess_analysis && analysis_target_explicit && analysis_target == AnalysisTarget::Replayed) {
+        fmt::print(stderr, "ERROR: --lichess-analysis requires --analysis-target logged\n");
+        return 1;
+    }
+    if (use_lichess_analysis)
+        analysis_target = AnalysisTarget::Logged;
 
     std::ifstream file(logfile);
     if (!file.is_open()) {
@@ -1448,9 +1476,11 @@ int main(int argc, char* argv[]) {
                     fflush(stdout);
                 }
 
-                std::string played_move = record.replayed_move.empty()
+                std::string played_move = analysis_target == AnalysisTarget::Logged
                     ? record.logged_move
                     : record.replayed_move;
+                if (played_move.empty())
+                    played_move = record.logged_move;
                 MoveValidation validation = validator->submit(record.position, played_move, record.depth).get();
 
                 if (quiet && !gui)

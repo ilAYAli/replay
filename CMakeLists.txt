@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.15)
 
 project(replay)
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(/opt/homebrew/include/)
 
-add_executable(replay replay.cpp validator.cpp)
+add_executable(replay replay.cpp)
 
 find_package(fmt REQUIRED)
 target_link_libraries(replay PRIVATE fmt::fmt-header-only)

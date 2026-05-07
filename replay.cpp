@@ -308,17 +308,17 @@ std::string formatAnalysisEntry(const AnalysisEntry& entry, const AnalysisWidths
 
 std::string formatReferenceInline(const MoveValidation& validation, bool color) {
     if (!validation.ok)
-        return " | SF n/a";
+        return " | n/a";
 
     if (isReportableJudgement(validation.label)) {
-        std::string judgement = fmt::format("SF {} {}cp", validation.label, validation.cp_loss);
+        std::string judgement = fmt::format("{} {}cp", validation.label, validation.cp_loss);
         return " | " + colorizeJudgement(judgement, validation.label, color);
     }
 
     if (validation.cp_loss > 0)
-        return fmt::format(" | SF loss {}cp | best: {}", validation.cp_loss, validation.bestmove);
+        return fmt::format(" | loss {}cp | best: {}", validation.cp_loss, validation.bestmove);
 
-    return " | " + colorizeJudgement("SF best", "best", color);
+    return " | " + colorizeJudgement("best", "best", color);
 }
 
 std::string colorizeAnalysisReport(const std::string& report, bool color) {
@@ -883,6 +883,7 @@ int runDirectory(const std::filesystem::path& directory,
                  char* argv[],
                  int logfile_arg_index,
                  bool cache_enabled,
+                 bool force,
                  const std::string& engine_tag,
                  const std::string& analysis_mode) {
     std::vector<std::filesystem::path> logs;
@@ -891,7 +892,7 @@ int runDirectory(const std::filesystem::path& directory,
         if (!entry.is_regular_file() || entry.path().extension() != ".log")
             continue;
 
-        if (cache_enabled && std::filesystem::exists(analysisPath(entry.path(), engine_tag, analysis_mode))) {
+        if (cache_enabled && !force && std::filesystem::exists(analysisPath(entry.path(), engine_tag, analysis_mode))) {
             cached++;
             continue;
         }
@@ -949,6 +950,7 @@ int main(int argc, char* argv[]) {
     bool print_only = false;
     bool verbose = false;
     bool color_output = true;
+    bool force = false;
     bool engine_path_explicit = false;
     std::vector<std::pair<int, std::string>> positional_args;
 
@@ -971,7 +973,8 @@ int main(int argc, char* argv[]) {
             "  --time              Replay with the original logged go wtime/btime command\n"
             "  --threads N         Send `setoption name Threads value N`\n"
             "  --print             Print logged bestmoves and exit\n"
-            "  --no-color          Disable colored SF judgement output\n"
+            "  --force             Ignore existing analysis files and analyze again\n"
+            "  --no-color          Disable colored judgement output\n"
             "  --verbose, -v       Print full UCI traffic\n"
             "  --help, -h          Show this help and exit\n",
             prog);
@@ -1001,6 +1004,8 @@ int main(int argc, char* argv[]) {
             time_mode = true;
         } else if (arg == "--print") {
             print_only = true;
+        } else if (arg == "--force") {
+            force = true;
         } else if (arg == "--no-color") {
             color_output = false;
         } else if (arg == "--verbose" || arg == "-v") {
@@ -1054,7 +1059,7 @@ int main(int argc, char* argv[]) {
 
     if (std::filesystem::is_directory(logfile))
         return runDirectory(logfile, argc, argv, logfile_arg_index,
-                            cache_enabled, engine_tag, analysis_mode);
+                            cache_enabled, force, engine_tag, analysis_mode);
 
     if (std::filesystem::path(logfile).extension() == ".pgn") {
         fmt::print(stderr, "ERROR: replay needs an Enyo .log file.\n");
@@ -1066,7 +1071,7 @@ int main(int argc, char* argv[]) {
         std::filesystem::path report_path;
         if (cache_enabled) {
             report_path = analysisPath(logfile_path, engine_tag, analysis_mode);
-            if (std::filesystem::exists(report_path)) {
+            if (!force && std::filesystem::exists(report_path)) {
                 std::string cached_report = readFile(report_path);
                 fmt::print("Analysis reused    : {}\n\n=== Analysis ===\n{}",
                            report_path.string(), colorizeAnalysisReport(cached_report, color_output));
@@ -1171,7 +1176,7 @@ int main(int argc, char* argv[]) {
             if (analyze) {
                 int depth = analysis_depth > 0 ? analysis_depth : entry.depth;
                 if (progress) {
-                    fmt::print("\r\033[KSF analyzing [{:2}/{:2}] depth {:2}",
+                    fmt::print("\r\033[Kanalyzing [{:2}/{:2}] depth {:2}",
                                entry.fullmove, display_total, depth);
                     fflush(stdout);
                 }

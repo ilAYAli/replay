@@ -73,6 +73,12 @@ Follow the logged engine depth for reference analysis:
 replay --analysis-depth 0 "game.log"
 ```
 
+Re-analyze even when a matching analysis file already exists:
+
+```sh
+replay --force "game.log"
+```
+
 Replay without the end analysis:
 
 ```sh

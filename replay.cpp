@@ -591,8 +591,13 @@ std::string probeEngineTag(const std::string& engine_path) {
     return sanitizeTag(std::filesystem::path(engine_path).filename().string());
 }
 
-std::string analysisModeName(bool time_mode) {
-    return time_mode ? "time" : "replayed";
+std::string analysisModeName(bool time_mode, int analysis_depth) {
+    std::string mode = time_mode ? "time" : "replayed";
+    if (analysis_depth == 20)
+        return mode;
+    if (analysis_depth == 0)
+        return mode + "_logged-depth";
+    return fmt::format("{}_depth{}", mode, analysis_depth);
 }
 
 std::filesystem::path analysisPath(const std::filesystem::path& logfile,
@@ -938,7 +943,7 @@ int main(int argc, char* argv[]) {
     int start_move = 0;
     int count = -1;
     int threads = -1;
-    int analysis_depth = 0;
+    int analysis_depth = 20;
     bool time_mode = false;
     bool analyze = true;
     bool print_only = false;
@@ -953,13 +958,13 @@ int main(int argc, char* argv[]) {
             "\n"
             "Replay Enyo UCI log searches and compare engine bestmoves with the log.\n"
             "At the end, analyze replayed candidate moves with a reference engine.\n"
-            "Full default reports are saved as <log>.<engine-tag>_replayed_analysis and reused.\n"
+            "Full reports are saved as <log>.<engine-tag>_<mode>_analysis and reused.\n"
             "\n"
             "Options:\n"
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
-            "  --analysis-depth N  Reference analysis depth (default: logged depth per move)\n"
+            "  --analysis-depth N  Reference analysis depth (default: 20; 0 follows logged depth)\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
@@ -983,7 +988,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--reference" && i + 1 < argc) {
             reference_path = argv[++i];
         } else if (arg == "--analysis-depth" && i + 1 < argc) {
-            analysis_depth = std::max(1, std::stoi(argv[++i]));
+            analysis_depth = std::max(0, std::stoi(argv[++i]));
         } else if (arg == "--no-analysis") {
             analyze = false;
         } else if (arg == "--move" && i + 1 < argc) {
@@ -1044,7 +1049,7 @@ int main(int argc, char* argv[]) {
             fmt::print(stderr, "Error: {}\n", e.what());
             return 1;
         }
-        analysis_mode = analysisModeName(time_mode);
+        analysis_mode = analysisModeName(time_mode, analysis_depth);
     }
 
     if (std::filesystem::is_directory(logfile))

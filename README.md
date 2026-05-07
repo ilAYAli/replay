@@ -27,7 +27,8 @@ commands so the engine version and applied options are visible.
 The end report is saved beside the log as
 `game.<engine-tag>_replayed_analysis`. If that file already exists, replay
 reuses it and skips the log. Limited/debug runs such as `--move` and `--count`
-are not cached.
+are not cached. Non-default analysis depths include the depth in the analysis
+name, such as `game.<engine-tag>_replayed_depth16_analysis`.
 
 Replay one log with an explicit engine:
 
@@ -59,10 +60,17 @@ Replay with the original logged time-control command instead of logged depth:
 replay --time --threads 4 --move 53 --count 1 "game.log"
 ```
 
-Use a specific reference engine and analysis depth:
+Use a specific reference engine and analysis depth. The default reference
+analysis depth is 20:
 
 ```sh
 replay --engine ./build/enyo --reference stockfish --analysis-depth 16 "game.log"
+```
+
+Follow the logged engine depth for reference analysis:
+
+```sh
+replay --analysis-depth 0 "game.log"
 ```
 
 Replay without the end analysis:

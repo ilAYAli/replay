@@ -100,7 +100,8 @@ struct AnalysisReportWidths {
 struct LoggedMoveRecord {
     int move_no = 0;
     std::string position;
-    std::string move;
+    std::string logged_move;
+    std::string replayed_move;
     int depth = 1;
 };
 
@@ -1380,7 +1381,7 @@ int main(int argc, char* argv[]) {
                 std::string expected = bestmoves[bestmoveIndex++];
                 pgn_position = appendMoveToPosition(current_position, expected);
                 int validation_depth = std::max(1, parseIntField(cmd, "depth"));
-                logged_moves.push_back({move_no, current_position, expected, validation_depth});
+                logged_moves.push_back({move_no, current_position, expected, bestmove, validation_depth});
 
                 // Track summary stats
                 had_any_move = true;
@@ -1431,8 +1432,8 @@ int main(int argc, char* argv[]) {
 
                 AnalysisReportEntry entry;
                 entry.label = advice->second.label;
-                entry.played_uci = record.move;
-                entry.played_move = coordinateMove(fen, record.move);
+                entry.played_uci = record.logged_move;
+                entry.played_move = coordinateMove(fen, record.logged_move);
                 entry.best_uci = best_uci;
                 entry.best_move = coordinateMove(fen, best_uci);
                 entry.fen = fen;
@@ -1447,7 +1448,10 @@ int main(int argc, char* argv[]) {
                     fflush(stdout);
                 }
 
-                MoveValidation validation = validator->submit(record.position, record.move, record.depth).get();
+                std::string played_move = record.replayed_move.empty()
+                    ? record.logged_move
+                    : record.replayed_move;
+                MoveValidation validation = validator->submit(record.position, played_move, record.depth).get();
 
                 if (quiet && !gui)
                     fmt::print("\r\033[K");
@@ -1458,7 +1462,7 @@ int main(int argc, char* argv[]) {
                     if (validation.quality < validation_stats.worst_quality) {
                         validation_stats.worst_quality = validation.quality;
                         validation_stats.worst_move_no = record.move_no;
-                        validation_stats.worst_move = record.move;
+                        validation_stats.worst_move = played_move;
                         validation_stats.worst_label = validation.label;
                     }
                 } else {
@@ -1468,7 +1472,7 @@ int main(int argc, char* argv[]) {
 
                 if (isReportableJudgement(validation)) {
                     std::string fen = getFenForPosition(engine, record.position);
-                    analysis_report.push_back(makeAnalysisReportEntry(validation, record.move, fen));
+                    analysis_report.push_back(makeAnalysisReportEntry(validation, played_move, fen));
                 }
             }
         }

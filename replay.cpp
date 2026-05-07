@@ -1,9 +1,7 @@
 #include <algorithm>
-#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <map>
 #include <optional>
 #include <regex>
 #include <stdexcept>
@@ -111,21 +109,14 @@ struct PositionTurn {
     char side = 'w';
 };
 
-struct LichessAdvice {
-    std::string label;
-    std::string played_san;
-    std::string best_san;
-};
-
-struct LichessAnalysis {
-    std::string game_id;
-    std::map<std::pair<int, char>, LichessAdvice> advices;
-};
-
 enum class AnalysisTarget {
     Replayed,
     Logged
 };
+
+std::string analysisTargetName(AnalysisTarget target) {
+    return target == AnalysisTarget::Logged ? "logged" : "replayed";
+}
 
 int moveCountFromPosition(const std::string& position) {
     size_t moves_pos = position.find(" moves ");
@@ -173,74 +164,12 @@ std::string appendMoveToPosition(const std::string& position, const std::string&
     return position + " moves " + move;
 }
 
-bool endsWith(const std::string& value, const std::string& suffix) {
-    return value.size() >= suffix.size()
-        && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
 std::string trim(std::string value) {
     size_t first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos)
         return "";
     size_t last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1);
-}
-
-std::optional<std::string> labelFromMoveToken(const std::string& token) {
-    if (endsWith(token, "??"))
-        return "blunder";
-    if (endsWith(token, "?!"))
-        return "inaccuracy";
-    if (endsWith(token, "?"))
-        return "mistake";
-    return std::nullopt;
-}
-
-std::string stripMoveGlyph(std::string token) {
-    if (endsWith(token, "??") || endsWith(token, "?!") || endsWith(token, "!?"))
-        token.resize(token.size() - 2);
-    else if (endsWith(token, "?") || endsWith(token, "!"))
-        token.resize(token.size() - 1);
-    return token;
-}
-
-std::optional<std::string> extractBestSan(const std::string& comment) {
-    std::string marker = " was best.";
-    size_t end = comment.find(marker);
-    if (end == std::string::npos)
-        return std::nullopt;
-
-    size_t start = comment.find_last_of(" \t\r\n", end == 0 ? 0 : end - 1);
-    if (start == std::string::npos)
-        start = 0;
-    else
-        start++;
-
-    std::string best = trim(comment.substr(start, end - start));
-    if (best.empty())
-        return std::nullopt;
-    return best;
-}
-
-std::map<std::pair<int, char>, LichessAdvice> parseLichessAdvices(const std::string& pgn) {
-    std::map<std::pair<int, char>, LichessAdvice> advices;
-    std::regex annotated_move(R"((\d+)\.(\.\.)?\s+([^\s\{\(\)]+)\s*\{([^{}]*was best\.)\s*\})");
-
-    for (std::sregex_iterator it(pgn.begin(), pgn.end(), annotated_move), end; it != end; ++it) {
-        int fullmove = std::stoi((*it)[1].str());
-        char side = (*it)[2].matched ? 'b' : 'w';
-        std::string token = (*it)[3].str();
-        std::string comment = (*it)[4].str();
-
-        auto label = labelFromMoveToken(token);
-        auto best_san = extractBestSan(comment);
-        if (!label || !best_san)
-            continue;
-
-        advices[{fullmove, side}] = {*label, stripMoveGlyph(token), *best_san};
-    }
-
-    return advices;
 }
 
 std::optional<std::string> readTextFile(const std::filesystem::path& path) {
@@ -251,86 +180,6 @@ std::optional<std::string> readTextFile(const std::filesystem::path& path) {
     std::ostringstream text;
     text << in.rdbuf();
     return text.str();
-}
-
-bool isLikelyLichessGameId(const std::string& value) {
-    if (value.size() < 8 || value.size() > 12)
-        return false;
-    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
-        return std::isalnum(ch);
-    });
-}
-
-std::optional<std::string> extractGameIdFromText(const std::string& text) {
-    std::regex game_id_tag(R"PGN(\[GameId\s+"([A-Za-z0-9]{8,12})"\])PGN");
-    std::smatch match;
-    if (std::regex_search(text, match, game_id_tag))
-        return match[1].str();
-
-    std::regex site_id(R"(lichess\.org/(?:game/export/)?([A-Za-z0-9]{8,12}))");
-    if (std::regex_search(text, match, site_id))
-        return match[1].str();
-
-    return std::nullopt;
-}
-
-std::optional<std::string> extractGameIdFromPath(const std::string& logfile) {
-    std::string stem = std::filesystem::path(logfile).stem().string();
-    std::regex trailing_id(R"(([A-Za-z0-9]{8,12})$)");
-    std::smatch match;
-    if (std::regex_search(stem, match, trailing_id) && isLikelyLichessGameId(match[1].str()))
-        return match[1].str();
-    return std::nullopt;
-}
-
-std::optional<std::string> fetchLichessPgn(const std::string& game_id) {
-    if (!isLikelyLichessGameId(game_id))
-        return std::nullopt;
-
-    std::string command = fmt::format(
-        "curl -fsSL 'https://lichess.org/game/export/{}?evals=1&clocks=0&literate=1'",
-        game_id);
-    FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe)
-        return std::nullopt;
-
-    std::string output;
-    std::array<char, 4096> buffer{};
-    while (fgets(buffer.data(), (int)buffer.size(), pipe))
-        output += buffer.data();
-
-    int rc = pclose(pipe);
-    if (rc != 0 || output.empty())
-        return std::nullopt;
-
-    return output;
-}
-
-std::optional<LichessAnalysis> loadLichessAnalysis(const std::string& logfile) {
-    std::optional<std::string> game_id;
-
-    std::filesystem::path pgn_path(logfile);
-    pgn_path.replace_extension(".pgn");
-    if (auto local_pgn = readTextFile(pgn_path)) {
-        auto advices = parseLichessAdvices(*local_pgn);
-        game_id = extractGameIdFromText(*local_pgn);
-        if (!advices.empty())
-            return LichessAnalysis{game_id.value_or("local-pgn"), std::move(advices)};
-    }
-
-    game_id = game_id ? game_id : extractGameIdFromPath(logfile);
-    if (!game_id)
-        return std::nullopt;
-
-    auto fetched_pgn = fetchLichessPgn(*game_id);
-    if (!fetched_pgn)
-        return std::nullopt;
-
-    auto advices = parseLichessAdvices(*fetched_pgn);
-    if (advices.empty())
-        return std::nullopt;
-
-    return LichessAnalysis{*game_id, std::move(advices)};
 }
 
 PositionTurn positionTurn(const std::string& position) {
@@ -485,12 +334,37 @@ std::string formatAnalysisReportEntry(const AnalysisReportEntry& entry, const An
                        entry.fen);
 }
 
-std::filesystem::path analysisPathForLog(const std::string& logfile) {
+std::string analysisGitHashSuffix(const std::string& engine_id_name) {
+    std::smatch match;
+    std::regex version_hash(R"(v\.([0-9A-Fa-f]{7,40}))");
+    if (!std::regex_search(engine_id_name, match, version_hash)) {
+        std::regex bare_hash(R"(\b([0-9A-Fa-f]{7,40})\b)");
+        if (!std::regex_search(engine_id_name, match, bare_hash))
+            return "";
+    }
+
+    std::string suffix = "_" + match[1].str();
+    if (engine_id_name.find("dirty") != std::string::npos)
+        suffix += "-dirty";
+    return suffix;
+}
+
+std::filesystem::path analysisPathForLog(const std::string& logfile,
+                                         const std::string& engine_id_name,
+                                         AnalysisTarget analysis_target,
+                                         int start_move,
+                                         int replay_count) {
     std::filesystem::path path(logfile);
+    std::string suffix = analysisGitHashSuffix(engine_id_name) + "_" + analysisTargetName(analysis_target);
+    if (start_move > 0)
+        suffix += fmt::format("_move{}", start_move);
+    if (replay_count >= 0)
+        suffix += fmt::format("_count{}", replay_count);
+    suffix += "_analysis";
     if (path.extension() == ".log")
-        path.replace_extension(".analysis");
+        path.replace_filename(path.stem().string() + "." + suffix.substr(1));
     else
-        path += ".analysis";
+        path += "." + suffix.substr(1);
     return path;
 }
 
@@ -522,6 +396,7 @@ class EngineProcess {
     pid_t pid;
     bool quiet;
     bool gui;
+    std::string id_name;
 
 public:
     EngineProcess(const std::string& engine_path, bool quiet_mode = false, bool gui_mode = false)
@@ -612,6 +487,15 @@ public:
             return line;
         }
         return "";
+    }
+
+    void recordUciId(const std::string& line) {
+        if (line.rfind("id name ", 0) == 0)
+            id_name = line.substr(8);
+    }
+
+    std::string idName() const {
+        return id_name;
     }
 
     std::string waitForBestmove(int move_num, int total_moves, const std::string& current_position, const std::string& expected = "", int budget_ms = -1) {
@@ -747,6 +631,7 @@ void waitForUciToken(EngineProcess& engine, const std::string& token, bool verbo
         std::string line = engine.readLine();
         if (line.empty())
             continue;
+        engine.recordUciId(line);
         if (verbose)
             fmt::print("{}\n", line);
         if (line == token)
@@ -762,6 +647,12 @@ void initializeUciEngine(EngineProcess& engine, bool verbose) {
 void waitForReady(EngineProcess& engine, bool verbose) {
     engine.send("isready");
     waitForUciToken(engine, "readyok", verbose);
+}
+
+std::string queryEngineIdName(const std::string& engine_path) {
+    EngineProcess engine(engine_path, true, false);
+    initializeUciEngine(engine, false);
+    return engine.idName();
 }
 
 bool isFenLine(const std::string& line) {
@@ -796,120 +687,6 @@ std::string getFen(EngineProcess& engine) {
 std::string getFenForPosition(EngineProcess& engine, const std::string& position) {
     engine.send(position);
     return getFen(engine);
-}
-
-std::vector<std::string> legalMovesForFen(EngineProcess& engine, const std::string& fen) {
-    std::vector<std::string> moves;
-    engine.send(fmt::format("position fen {}", fen));
-    engine.send("go perft 1");
-
-    while (true) {
-        if (!engine.waitReadable(30000))
-            throw std::runtime_error("Timed out waiting for legal moves");
-
-        std::string line = engine.readLine();
-        if (line.rfind("Nodes searched:", 0) == 0)
-            break;
-
-        size_t colon = line.find(':');
-        if (colon == std::string::npos)
-            continue;
-
-        std::string move = line.substr(0, colon);
-        if (move.size() >= 4)
-            moves.push_back(move);
-    }
-
-    return moves;
-}
-
-std::string normalizeSan(std::string san) {
-    san = trim(san);
-    while (!san.empty() && (san.back() == '+' || san.back() == '#' || san.back() == '!' || san.back() == '?'))
-        san.pop_back();
-    if (san == "0-0")
-        return "O-O";
-    if (san == "0-0-0")
-        return "O-O-O";
-    return san;
-}
-
-std::optional<std::string> uciForSan(EngineProcess& engine, const std::string& fen, const std::string& san) {
-    std::string clean = normalizeSan(san);
-    auto legal_moves = legalMovesForFen(engine, fen);
-
-    if (clean == "O-O" || clean == "O-O-O") {
-        char rank = fen.find(" b ") != std::string::npos ? '8' : '1';
-        std::string target = clean == "O-O" ? fmt::format("e{}g{}", rank, rank)
-                                            : fmt::format("e{}c{}", rank, rank);
-        auto found = std::find(legal_moves.begin(), legal_moves.end(), target);
-        if (found != legal_moves.end())
-            return *found;
-        return std::nullopt;
-    }
-
-    char promotion = '\0';
-    size_t promotion_pos = clean.find('=');
-    if (promotion_pos != std::string::npos && promotion_pos + 1 < clean.size()) {
-        promotion = (char)std::toupper((unsigned char)clean[promotion_pos + 1]);
-        clean = clean.substr(0, promotion_pos);
-    }
-
-    std::string san_no_capture;
-    for (char ch : clean) {
-        if (ch != 'x')
-            san_no_capture.push_back(ch);
-    }
-
-    size_t dest_pos = std::string::npos;
-    for (size_t i = 0; i + 1 < san_no_capture.size(); ++i) {
-        if (san_no_capture[i] >= 'a' && san_no_capture[i] <= 'h'
-         && san_no_capture[i + 1] >= '1' && san_no_capture[i + 1] <= '8') {
-            dest_pos = i;
-        }
-    }
-    if (dest_pos == std::string::npos)
-        return std::nullopt;
-
-    std::string dest = san_no_capture.substr(dest_pos, 2);
-    char piece = 'P';
-    size_t prefix_start = 0;
-    if (!san_no_capture.empty()
-     && (san_no_capture[0] == 'K' || san_no_capture[0] == 'Q' || san_no_capture[0] == 'R'
-      || san_no_capture[0] == 'B' || san_no_capture[0] == 'N')) {
-        piece = san_no_capture[0];
-        prefix_start = 1;
-    }
-
-    std::string disambiguation = san_no_capture.substr(prefix_start, dest_pos - prefix_start);
-
-    for (const auto& move : legal_moves) {
-        if (move.size() < 4 || move.substr(2, 2) != dest)
-            continue;
-        if (promotion != '\0' && (move.size() < 5 || std::toupper((unsigned char)move[4]) != promotion))
-            continue;
-        if (promotion == '\0' && move.size() >= 5)
-            continue;
-
-        char from_piece = pieceAt(fen, move[0], move[1]);
-        if (std::toupper((unsigned char)from_piece) != piece)
-            continue;
-
-        if (disambiguation.size() == 1) {
-            char hint = disambiguation[0];
-            if (hint >= 'a' && hint <= 'h' && move[0] != hint)
-                continue;
-            if (hint >= '1' && hint <= '8' && move[1] != hint)
-                continue;
-        } else if (disambiguation.size() == 2) {
-            if (move[0] != disambiguation[0] || move[1] != disambiguation[1])
-                continue;
-        }
-
-        return move;
-    }
-
-    return std::nullopt;
 }
 
 void printBoard(EngineProcess& engine) {
@@ -975,21 +752,18 @@ std::string stripTerminalControls(const std::string& line) {
     return trim(clean);
 }
 
-int runBatchCommand(const std::string& command, const std::filesystem::path& runlog, const std::string& label) {
+struct BatchCommandResult {
+    int status = -1;
+    std::string output;
+};
+
+BatchCommandResult runBatchCommand(const std::string& command, const std::string& label) {
     FILE* pipe = popen((command + " 2>&1").c_str(), "r");
     if (!pipe)
-        return -1;
-
-    std::ofstream out(runlog);
-    if (!out.is_open()) {
-        pclose(pipe);
-        return -1;
-    }
+        return {};
 
     int fd = fileno(pipe);
-    auto started = std::chrono::steady_clock::now();
     auto last_progress = std::chrono::steady_clock::now() - std::chrono::seconds(30);
-    auto last_heartbeat = std::chrono::steady_clock::now();
     auto process_line = [&](const std::string& raw) {
         std::string line = stripTerminalControls(raw);
         if (line.empty())
@@ -1011,39 +785,13 @@ int runBatchCommand(const std::string& command, const std::filesystem::path& run
 
     std::array<char, 4096> buffer{};
     std::string line;
+    BatchCommandResult result;
     while (true) {
-        struct pollfd pfd{fd, POLLIN | POLLHUP, 0};
-        int poll_rc = poll(&pfd, 1, 1000);
-        if (poll_rc == 0) {
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_heartbeat >= std::chrono::seconds(30)) {
-                fmt::print("  {}: still running ({})\n", label, formatElapsed(now - started));
-                fflush(stdout);
-                last_heartbeat = now;
-            }
-            continue;
-        }
-        if (poll_rc < 0) {
-            if (errno == EINTR)
-                continue;
-            pclose(pipe);
-            return -1;
-        }
-        if (!(pfd.revents & (POLLIN | POLLHUP)))
-            continue;
-
         ssize_t bytes = read(fd, buffer.data(), buffer.size());
-        if (bytes == 0)
+        if (bytes <= 0)
             break;
-        if (bytes < 0) {
-            if (errno == EINTR)
-                continue;
-            pclose(pipe);
-            return -1;
-        }
 
-        out.write(buffer.data(), bytes);
-        out.flush();
+        result.output.append(buffer.data(), (size_t)bytes);
         for (ssize_t i = 0; i < bytes; ++i) {
             char ch = buffer[i];
             if (ch == '\n' || ch == '\r') {
@@ -1057,10 +805,18 @@ int runBatchCommand(const std::string& command, const std::filesystem::path& run
     if (!line.empty())
         process_line(line);
 
-    return pclose(pipe);
+    result.status = pclose(pipe);
+    return result;
 }
 
-int runBatchAnalysis(const std::filesystem::path& directory, int argc, char* argv[], int logfile_arg_index) {
+int runBatchAnalysis(const std::filesystem::path& directory,
+                     int argc,
+                     char* argv[],
+                     int logfile_arg_index,
+                     const std::string& engine_id_name,
+                     AnalysisTarget analysis_target,
+                     int start_move,
+                     int replay_count) {
     std::vector<std::filesystem::path> logs;
     for (const auto& entry : std::filesystem::directory_iterator(directory)) {
         if (entry.is_regular_file() && entry.path().extension() == ".log")
@@ -1082,13 +838,45 @@ int runBatchAnalysis(const std::filesystem::path& directory, int argc, char* arg
 
     int failures = 0;
     int issues = 0;
+    auto append_report_text = [&](const std::string& text, const std::filesystem::path& log) {
+        std::istringstream lines(text);
+        std::string line;
+        while (std::getline(lines, line)) {
+            line = stripTerminalControls(line);
+            if (!isAnalysisIssueLine(line))
+                continue;
+            summary << log.filename().string() << ": " << line << '\n';
+            issues++;
+        }
+    };
+    auto append_report_file = [&](const std::filesystem::path& source, const std::filesystem::path& log) -> bool {
+        auto text = readTextFile(source);
+        if (!text)
+            return false;
+
+        append_report_text(*text, log);
+        return true;
+    };
+
     for (size_t i = 0; i < logs.size(); ++i) {
         const auto& log = logs[i];
-        std::filesystem::path runlog = log;
-        runlog.replace_extension(".runlog");
 
         fmt::print("[{}/{}] {}\n", i + 1, logs.size(), log.filename().string());
         fflush(stdout);
+
+        std::filesystem::path existing_analysis = analysisPathForLog(log.string(), engine_id_name, analysis_target, start_move, replay_count);
+        if (!analysisGitHashSuffix(engine_id_name).empty()
+         && std::filesystem::exists(existing_analysis)) {
+            fmt::print("  {}: using existing {}\n",
+                       log.filename().string(), existing_analysis.filename().string());
+            fflush(stdout);
+            if (!append_report_file(existing_analysis, log)) {
+                failures++;
+                summary << log.filename().string() << ": ERROR: failed to read "
+                        << existing_analysis.filename().string() << '\n';
+            }
+            continue;
+        }
 
         std::string command = shellQuote(argv[0]);
         for (int arg = 1; arg < argc; ++arg) {
@@ -1100,32 +888,17 @@ int runBatchAnalysis(const std::filesystem::path& directory, int argc, char* arg
         }
 
         auto started = std::chrono::steady_clock::now();
-        int rc = runBatchCommand(command, runlog, log.filename().string());
+        BatchCommandResult result = runBatchCommand(command, log.filename().string());
         fmt::print("  {}: finished in {}\n",
                    log.filename().string(), formatElapsed(std::chrono::steady_clock::now() - started));
         fflush(stdout);
-        if (rc != 0) {
+        if (result.status != 0) {
             failures++;
-            summary << log.filename().string() << ": ERROR: replay failed; see "
-                    << runlog.filename().string() << '\n';
+            summary << log.filename().string() << ": ERROR: replay failed\n";
             continue;
         }
 
-        auto runlog_text = readTextFile(runlog);
-        if (!runlog_text) {
-            failures++;
-            summary << log.filename().string() << ": ERROR: missing runlog output\n";
-            continue;
-        }
-
-        std::istringstream lines(*runlog_text);
-        std::string line;
-        while (std::getline(lines, line)) {
-            if (!isAnalysisIssueLine(line))
-                continue;
-            summary << log.filename().string() << ": " << line << '\n';
-            issues++;
-        }
+        append_report_text(result.output, log);
     }
 
     if (issues == 0 && failures == 0)
@@ -1153,13 +926,11 @@ int main(int argc, char* argv[]) {
     bool time_mode = false;  // --time: replay original `go wtime...` instead of `go depth N`
     bool validate = true;   // Analyze by default if reference engine is found
     bool color = false;
-    bool save_analysis = false;
-    bool use_lichess_analysis = false;
+    bool save_analysis = true;
     AnalysisTarget analysis_target = AnalysisTarget::Replayed;
-    bool analysis_target_explicit = false;
     int threads = -1;    // -1 = don't send setoption; otherwise override engine default
-    int skip = 0;
-    int max_moves = -1;  // -1 = replay all remaining
+    int start_move = 0;  // 0 = start from first logged move
+    int replay_count = -1;  // -1 = replay all remaining
 
     auto print_help = [&](const char* prog) {
         fmt::print(
@@ -1169,28 +940,26 @@ int main(int argc, char* argv[]) {
             "comparing the candidate engine's current bestmoves against the logged ones.\n"
             "If the target is a directory, runs all *.log files and writes\n"
             "analysis.summary with filename-prefixed issues.\n"
+            "Existing matching <log>.<engine-githash>_<target>_analysis files are reused.\n"
             "\n"
             "Options:\n"
             "  --candidate <path>  Path to the candidate engine binary (default: enyo)\n"
             "  --reference <path>  Reference engine for local analysis (default: stockfish)\n"
             "                      Analyzes replayed moves at the end, at logged depth.\n"
             "                      Labels inaccuracies, mistakes, and blunders using\n"
-            "                      Lichess-style winning-chance loss thresholds.\n"
-            "  --no-analysis       Replay only; do not generate the end analysis report\n"
+            "                      winning-chance loss thresholds.\n"
+            "  --no-analysis       Replay only; do not generate or save the end analysis report\n"
+            "  --no-save-analysis  Print analysis only; do not save <name>.<engine-githash>_<target>_analysis\n"
             "  --analysis-target replayed|logged\n"
-            "                      Local analysis target (default: replayed). Lichess\n"
-            "                      analysis always uses logged game moves.\n"
-            "  --skip N            Skip to the first logged position after fullmove N.\n"
+            "                      Local analysis target (default: replayed)\n"
+            "  --move N            Start at fullmove N.\n"
             "                      NOTE: this jumps straight to that move with a fresh engine, so TT,\n"
             "                      history, and time state do NOT match the original\n"
-            "                      run. Do not use --skip to reproduce state-dependent\n"
+            "                      run. Do not use --move to reproduce state-dependent\n"
             "                      bugs (fallbacks, time-management, TT-driven moves).\n"
-            "  --moves N           Replay at most N moves (after skipping)\n"
-            "  --count N           Alias for --moves\n"
+            "  --count N           Replay at most N engine moves\n"
             "  --print             Print the log's bestmoves and exit (no engine run)\n"
             "  --pgn               Print PGN for the replayed logged moves at the end\n"
-            "  --save-analysis     Save analysis beside the log as <name>.analysis\n"
-            "  --lichess-analysis  Use Lichess annotated export for the end report\n"
             "  --time              Replay with the original `go wtime X btime Y winc Z binc W`\n"
             "                      command from the log, not `go depth N`. Needed to reproduce\n"
             "                      timeout-driven fallbacks (e.g. empty-PV bestmove fallbacks).\n"
@@ -1224,13 +993,10 @@ int main(int argc, char* argv[]) {
             print_only = true;
         } else if (arg == "--pgn") {
             print_pgn = true;
-        } else if (arg == "--save-analysis") {
-            save_analysis = true;
-        } else if (arg == "--lichess-analysis") {
-            use_lichess_analysis = true;
+        } else if (arg == "--no-save-analysis") {
+            save_analysis = false;
         } else if (arg == "--analysis-target" && i + 1 < argc) {
             std::string target = argv[++i];
-            analysis_target_explicit = true;
             if (target == "replayed") {
                 analysis_target = AnalysisTarget::Replayed;
             } else if (target == "logged") {
@@ -1246,12 +1012,12 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--threads" && i + 1 < argc) {
             threads = std::stoi(argv[++i]);
             if (threads < 1) threads = 1;
-        } else if (arg == "--skip" && i + 1 < argc) {
-            skip = std::stoi(argv[++i]);
-            if (skip < 0) skip = 0;
-        } else if ((arg == "--moves" || arg == "--count") && i + 1 < argc) {
-            max_moves = std::stoi(argv[++i]);
-            if (max_moves < 0) max_moves = 0;
+        } else if (arg == "--move" && i + 1 < argc) {
+            start_move = std::stoi(argv[++i]);
+            if (start_move < 1) start_move = 1;
+        } else if (arg == "--count" && i + 1 < argc) {
+            replay_count = std::stoi(argv[++i]);
+            if (replay_count < 0) replay_count = 0;
         } else if (arg.rfind("--", 0) == 0 || arg == "-v" || arg == "-h") {
             fmt::print(stderr, "Unknown or malformed option: {}\n", arg);
             print_help(argv[0]);
@@ -1268,29 +1034,38 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (!validate && save_analysis) {
-        fmt::print(stderr, "ERROR: --save-analysis cannot be used with --no-analysis\n");
-        return 1;
-    }
-
-    if (!validate && use_lichess_analysis) {
-        fmt::print(stderr, "ERROR: --lichess-analysis cannot be used with --no-analysis\n");
-        return 1;
-    }
-
-    if (use_lichess_analysis && analysis_target_explicit && analysis_target == AnalysisTarget::Replayed) {
-        fmt::print(stderr, "ERROR: --lichess-analysis requires --analysis-target logged\n");
-        return 1;
-    }
-    if (use_lichess_analysis)
-        analysis_target = AnalysisTarget::Logged;
-
     if (std::filesystem::is_directory(logfile)) {
         if (!validate) {
             fmt::print(stderr, "ERROR: directory batch analysis cannot be used with --no-analysis\n");
             return 1;
         }
-        return runBatchAnalysis(logfile, argc, argv, logfile_arg_index);
+        std::string batch_engine_id_name;
+        try {
+            batch_engine_id_name = queryEngineIdName(engine_path);
+        } catch (...) {
+        }
+        return runBatchAnalysis(logfile, argc, argv, logfile_arg_index, batch_engine_id_name, analysis_target, start_move, replay_count);
+    }
+
+    if (validate && !print_only && !print_pgn && !gui) {
+        std::string existing_engine_id_name;
+        try {
+            existing_engine_id_name = queryEngineIdName(engine_path);
+        } catch (...) {
+        }
+
+        std::filesystem::path existing_analysis = analysisPathForLog(logfile, existing_engine_id_name,
+                                                                     analysis_target, start_move, replay_count);
+        if (!analysisGitHashSuffix(existing_engine_id_name).empty()
+         && std::filesystem::exists(existing_analysis)) {
+            fmt::print("Analysis reused    : {}\n", existing_analysis.string());
+            if (auto report = readTextFile(existing_analysis)) {
+                fmt::print("\n=== Analysis ===\n{}", *report);
+                if (report->empty() || report->back() != '\n')
+                    fmt::print("\n");
+                return 0;
+            }
+        }
     }
 
     std::ifstream file(logfile);
@@ -1426,11 +1201,11 @@ int main(int argc, char* argv[]) {
     int total_moves = (int)bestmoves.size();  // original count, preserved for display
     int display_total_move = move_numbers.empty() ? total_moves : move_numbers.back();
 
-    if (skip > 0) {
-        auto first_remaining = std::upper_bound(move_numbers.begin(), move_numbers.end(), skip);
+    if (start_move > 0) {
+        auto first_remaining = std::lower_bound(move_numbers.begin(), move_numbers.end(), start_move);
         int skipped_entries = (int)std::distance(move_numbers.begin(), first_remaining);
         if (skipped_entries >= total_moves) {
-            fmt::print(stderr, "ERROR: --skip {} leaves no positions after fullmove {}\n", skip, skip);
+            fmt::print(stderr, "ERROR: --move {} leaves no matching or later positions\n", start_move);
             return 1;
         }
         // commands is [position, go, position, go, ...] — drop 2 entries per skipped position.
@@ -1439,17 +1214,17 @@ int main(int argc, char* argv[]) {
         move_numbers.erase(move_numbers.begin(), move_numbers.begin() + skipped_entries);
         if ((int)timings.size() >= skipped_entries)
             timings.erase(timings.begin(), timings.begin() + skipped_entries);
-        fmt::print("Skipping to fullmove {}; skipped {} log entries; {} remaining\n",
-                   skip + 1, skipped_entries, bestmoves.size());
+        fmt::print("Starting at fullmove {}; skipped {} log entries; {} remaining\n",
+                   move_numbers.front(), skipped_entries, bestmoves.size());
     }
 
-    if (max_moves >= 0 && (int)bestmoves.size() > max_moves) {
-        commands.erase(commands.begin() + 2 * max_moves, commands.end());
-        bestmoves.erase(bestmoves.begin() + max_moves, bestmoves.end());
-        move_numbers.erase(move_numbers.begin() + max_moves, move_numbers.end());
-        if ((int)timings.size() > max_moves)
-            timings.erase(timings.begin() + max_moves, timings.end());
-        fmt::print("Limiting to {} moves\n", max_moves);
+    if (replay_count >= 0 && (int)bestmoves.size() > replay_count) {
+        commands.erase(commands.begin() + 2 * replay_count, commands.end());
+        bestmoves.erase(bestmoves.begin() + replay_count, bestmoves.end());
+        move_numbers.erase(move_numbers.begin() + replay_count, move_numbers.end());
+        if ((int)timings.size() > replay_count)
+            timings.erase(timings.begin() + replay_count, timings.end());
+        fmt::print("Limiting to {} moves\n", replay_count);
     }
 
     if (print_only) {
@@ -1484,6 +1259,7 @@ int main(int argc, char* argv[]) {
         EngineProcess engine(engine_path, quiet, gui);
 
         initializeUciEngine(engine, !quiet && !gui);
+        std::string candidate_id_name = engine.idName();
 
         // Send setoptions from original game
         for (const auto& opt : setoptions) {
@@ -1520,18 +1296,6 @@ int main(int argc, char* argv[]) {
             }
             if (!quiet && !gui)
                 fmt::print("Using reference engine for end analysis: {}\n", reference_path);
-        }
-
-        std::optional<LichessAnalysis> lichess_analysis;
-        if (validate && use_lichess_analysis) {
-            lichess_analysis = loadLichessAnalysis(logfile);
-            if (!lichess_analysis) {
-                fmt::print(stderr, "ERROR: Could not load Lichess annotated analysis for '{}'\n", logfile);
-                fmt::print(stderr, "       Expected a sibling annotated .pgn or a Lichess game id in the filename/PGN.\n");
-                return 1;
-            }
-            if (!quiet && !gui)
-                fmt::print("Using Lichess analysis: {}\n", lichess_analysis->game_id);
         }
 
         int bestmoveIndex = 0;
@@ -1674,30 +1438,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (had_any_move && validate && use_lichess_analysis) {
-            EngineProcess legal_engine(reference_path, true, false);
-            initializeUciEngine(legal_engine, false);
-
-            for (const auto& record : logged_moves) {
-                PositionTurn turn = positionTurn(record.position);
-                auto advice = lichess_analysis->advices.find({turn.fullmove, turn.side});
-                if (advice == lichess_analysis->advices.end())
-                    continue;
-
-                std::string fen = getFenForPosition(engine, record.position);
-                std::string best_uci = uciForSan(legal_engine, fen, advice->second.best_san)
-                    .value_or(advice->second.best_san);
-
-                AnalysisReportEntry entry;
-                entry.label = advice->second.label;
-                entry.played_uci = record.logged_move;
-                entry.played_move = coordinateMove(fen, record.logged_move);
-                entry.best_uci = best_uci;
-                entry.best_move = coordinateMove(fen, best_uci);
-                entry.fen = fen;
-                analysis_report.push_back(entry);
-            }
-        } else if (had_any_move && validate) {
+        if (had_any_move && validate) {
             auto validator = std::make_unique<ValidatorWorker>(reference_path);
             for (const auto& record : logged_moves) {
                 if (quiet && !gui) {
@@ -1766,9 +1507,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (validate) {
-                if (use_lichess_analysis && lichess_analysis) {
-                    fmt::print("Analysis source    : Lichess {}\n", lichess_analysis->game_id);
-                } else if (validation_stats.count > 0) {
+                if (validation_stats.count > 0) {
                     double avg_quality = validation_stats.quality_total / (double)validation_stats.count;
                     fmt::print("SF score           : avg {}, worst {}\n",
                                formatQualityPercent(avg_quality, color),
@@ -1819,7 +1558,7 @@ int main(int argc, char* argv[]) {
                     fmt::print("{}\n", formatAnalysisReportEntry(entry, widths));
             }
             if (save_analysis) {
-                std::filesystem::path analysis_path = analysisPathForLog(logfile);
+                std::filesystem::path analysis_path = analysisPathForLog(logfile, candidate_id_name, analysis_target, start_move, replay_count);
                 writeAnalysisReport(analysis_path, analysis_report);
                 fmt::print("Analysis saved     : {}\n", analysis_path.string());
             }

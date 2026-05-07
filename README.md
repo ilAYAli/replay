@@ -25,14 +25,13 @@ Replay without analysis:
 replay --no-analysis "Hypersion vs EnyoBot - npmgxvIO.log"
 ```
 
-Start after a fullmove number and replay one engine move:
+Start at a fullmove number and replay one engine move:
 
 ```sh
-replay --skip 52 --moves 1 "Hypersion vs EnyoBot - npmgxvIO.log"
+replay --move 53 --count 1 "Hypersion vs EnyoBot - npmgxvIO.log"
 ```
 
-`--skip N` starts at the first logged position after fullmove `N`, so
-`--skip 52` starts at fullmove 53.
+`--move N` starts at the first logged position at or after fullmove `N`.
 
 ## Analysis Targets
 
@@ -49,23 +48,25 @@ Analyze the `bestmove` recorded in the logfile instead:
 replay --analysis-target logged "game.log"
 ```
 
-## Lichess Analysis
-
-Use Lichess's annotated export for the end report:
-
-```sh
-replay --lichess-analysis "Hypersion vs EnyoBot - npmgxvIO.log"
-```
-
-Lichess analysis always describes the logged game moves, not newly replayed
-engine choices.
-
 ## Saving Reports
 
-Save the analysis beside the log as `<name>.analysis`:
+Replay saves the analysis beside the log by default. If the candidate engine
+UCI id contains a git hash, the filename includes both hash and target as
+`<name>.<githash>_<target>_analysis`:
 
 ```sh
-replay --save-analysis "game.log"
+replay "game.log"
+```
+
+For example, Enyo `id name Enyo Release v.dcdd1fe (dirty) ...` with the
+default replayed target writes `game.dcdd1fe-dirty_replayed_analysis`.
+Runs with `--move` or `--count` include those limits in the filename, for
+example `game.dcdd1fe-dirty_replayed_move53_count1_analysis`.
+
+Print the analysis without saving it:
+
+```sh
+replay --no-save-analysis "game.log"
 ```
 
 Example report line:
@@ -83,7 +84,9 @@ directory and writes `analysis.summary` with filename-prefixed issues:
 replay --analysis-target replayed ~/code/cpp/chess/lichess/pgns
 ```
 
-This also writes one `.runlog` per input log for inspection.
+This also writes one target-specific analysis file per input log for inspection.
+If a matching `<name>.<githash>_<target>_analysis` already exists, batch mode
+reuses it instead of analysing that log again.
 
 Use logged moves for historical game analysis:
 
@@ -91,10 +94,10 @@ Use logged moves for historical game analysis:
 replay --analysis-target logged ~/code/cpp/chess/lichess/pgns
 ```
 
-Also save each per-game `.analysis` file:
+Avoid writing per-game analysis files:
 
 ```sh
-replay --analysis-target replayed --save-analysis ~/code/cpp/chess/lichess/pgns
+replay --analysis-target replayed --no-save-analysis ~/code/cpp/chess/lichess/pgns
 ```
 
 ## Reproducing Time-State Issues
@@ -102,7 +105,7 @@ replay --analysis-target replayed --save-analysis ~/code/cpp/chess/lichess/pgns
 Replay with the original `go wtime ...` command from the log:
 
 ```sh
-replay --time --threads 4 --skip 52 --moves 1 "game.log"
+replay --time --threads 4 --move 53 --count 1 "game.log"
 ```
 
 Use this when investigating timeouts, fallback moves, or other state-dependent

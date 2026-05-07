@@ -77,6 +77,14 @@ int sideToMoveSign(const std::string& position) {
     return sign;
 }
 
+std::string appendMoveToPosition(const std::string& position, const std::string& move) {
+    if (move.empty() || move == "(none)")
+        return position;
+    if (position.find(" moves ") != std::string::npos)
+        return position + " " + move;
+    return position + " moves " + move;
+}
+
 int qualityFromLoss(int loss_cp, bool stockfish_best) {
     if (stockfish_best)
         return 99;
@@ -87,18 +95,88 @@ int qualityFromLoss(int loss_cp, bool stockfish_best) {
     return std::clamp((int)std::lround(99.0 * std::exp(-loss_cp / 180.0)), 0, 99);
 }
 
-std::string qualityLabel(int quality) {
-    if (quality >= 95)
-        return "brilliant";
-    if (quality >= 85)
-        return "excellent";
-    if (quality >= 70)
-        return "good";
-    if (quality >= 50)
-        return "inaccuracy";
-    if (quality >= 25)
+enum class ScoreKind {
+    None,
+    Cp,
+    Mate
+};
+
+struct Score {
+    ScoreKind kind = ScoreKind::None;
+    int value = 0;
+};
+
+Score scoreForSide(Score score, int side_sign) {
+    if (score.kind != ScoreKind::None)
+        score.value *= side_sign;
+    return score;
+}
+
+int scoreAsCp(Score score) {
+    if (score.kind == ScoreKind::Cp)
+        return score.value;
+    if (score.kind == ScoreKind::Mate) {
+        int sign = score.value >= 0 ? +1 : -1;
+        return sign * (100000 - std::min(std::abs(score.value), 1000));
+    }
+    return 0;
+}
+
+int lichessCappedCp(int cp) {
+    return std::clamp(cp, -1000, 1000);
+}
+
+double lichessWinningChances(int cp) {
+    constexpr double multiplier = -0.00368208;
+    double chances = 2.0 / (1.0 + std::exp(multiplier * lichessCappedCp(cp))) - 1.0;
+    return std::clamp(chances, -1.0, 1.0);
+}
+
+std::string lichessJudgement(int best_cp, int played_cp) {
+    double loss = lichessWinningChances(best_cp) - lichessWinningChances(played_cp);
+    if (loss >= 0.3)
+        return "blunder";
+    if (loss >= 0.2)
         return "mistake";
-    return "blunder";
+    if (loss >= 0.1)
+        return "inaccuracy";
+    return "";
+}
+
+std::string lichessMateJudgement(Score best, Score played) {
+    if (best.kind == ScoreKind::Cp
+     && played.kind == ScoreKind::Mate
+     && played.value < 0) {
+        if (best.value < -999)
+            return "inaccuracy";
+        if (best.value < -700)
+            return "mistake";
+        return "blunder";
+    }
+
+    if (best.kind == ScoreKind::Mate
+     && best.value > 0
+     && (played.kind == ScoreKind::Cp
+      || (played.kind == ScoreKind::Mate && played.value < 0))) {
+        int played_cp_or_zero = played.kind == ScoreKind::Cp ? played.value : 0;
+        if (played_cp_or_zero > 999)
+            return "inaccuracy";
+        if (played_cp_or_zero > 700)
+            return "mistake";
+        return "blunder";
+    }
+
+    return "";
+}
+
+std::string lichessJudgement(Score best, Score played) {
+    if (best.kind == ScoreKind::Cp && played.kind == ScoreKind::Cp)
+        return lichessJudgement(best.value, played.value);
+    return lichessMateJudgement(best, played);
+}
+
+bool isJudgementLabel(const std::string& label) {
+    return label == "inaccuracy" || label == "mistake" || label == "blunder";
 }
 
 class UciProcess {
@@ -208,7 +286,7 @@ void waitForReady(UciProcess& engine) {
 struct SearchResult {
     std::string bestmove;
     int depth = 0;
-    int cp_white = 0;
+    Score score_white;
     bool has_score = false;
 };
 
@@ -226,14 +304,13 @@ void updateSearchScore(SearchResult& result, const std::string& line, int stm_si
         size_t start = mate_pos + 11;
         size_t end = line.find(' ', start);
         int mate = std::stoi(line.substr(start, end - start));
-        int sign = mate >= 0 ? +1 : -1;
-        result.cp_white = sign * stm_sign * (100000 - std::min(std::abs(mate), 1000));
+        result.score_white = {ScoreKind::Mate, mate * stm_sign};
         result.has_score = true;
     } else if (cp_pos != std::string::npos) {
         size_t start = cp_pos + 9;
         size_t end = line.find(' ', start);
         int cp = std::stoi(line.substr(start, end - start));
-        result.cp_white = cp * stm_sign;
+        result.score_white = {ScoreKind::Cp, cp * stm_sign};
         result.has_score = true;
     }
 }
@@ -272,6 +349,9 @@ MoveValidation validateMove(UciProcess& validator, const std::string& position, 
         return validation;
     }
 
+    validator.send("ucinewgame");
+    waitForReady(validator);
+
     SearchResult before = searchDepth(validator, position, search_depth);
     if (!before.has_score) {
         validation.error = "validator returned no score";
@@ -284,24 +364,25 @@ MoveValidation validateMove(UciProcess& validator, const std::string& position, 
     if (stockfish_best) {
         validation.ok = true;
         validation.quality = 99;
-        validation.label = qualityLabel(validation.quality);
         return validation;
     }
 
-    SearchResult played = searchDepth(validator, position, search_depth, played_move);
+    SearchResult played = searchDepth(validator, appendMoveToPosition(position, played_move), search_depth);
     if (!played.has_score) {
         validation.error = "validator returned no score";
         return validation;
     }
 
     int mover_sign = sideToMoveSign(position);
-    int best_cp = before.cp_white * mover_sign;
-    int played_cp = played.cp_white * mover_sign;
+    Score best_score = scoreForSide(before.score_white, mover_sign);
+    Score played_score = scoreForSide(played.score_white, mover_sign);
+    int best_cp = scoreAsCp(best_score);
+    int played_cp = scoreAsCp(played_score);
     int loss_cp = std::max(0, best_cp - played_cp);
 
     validation.ok = true;
     validation.quality = qualityFromLoss(loss_cp, stockfish_best);
-    validation.label = qualityLabel(validation.quality);
+    validation.label = lichessJudgement(best_score, played_score);
     validation.cp_loss = loss_cp;  // Store the centipawn loss
     return validation;
 }
@@ -345,14 +426,9 @@ std::string formatValidation(const MoveValidation& validation, bool color) {
 
     std::string quality_str = formatQualityPercent(validation.quality, color);
     
-    // Categorize based on quality percentage and show SF's preferred move for weak moves
-    if (validation.quality < 50.0) {
+    if (isJudgementLabel(validation.label)) {
         std::string sf_move = validation.best_move.empty() ? "" : fmt::format(", SF prefers {}", validation.best_move);
-        return fmt::format(" | SF {} (blunder{})", quality_str, sf_move);
-    }
-    if (validation.quality < 75.0) {
-        std::string sf_move = validation.best_move.empty() ? "" : fmt::format(", SF prefers {}", validation.best_move);
-        return fmt::format(" | SF {} (miss{})", quality_str, sf_move);
+        return fmt::format(" | SF {} ({}{})", quality_str, validation.label, sf_move);
     }
     
     return fmt::format(" | SF {}", quality_str);

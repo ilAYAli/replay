@@ -8,7 +8,7 @@ struct MoveValidation {
     bool ok = false;
     std::string error;
     int quality = 0;
-    std::string label;
+    std::string label;      // inaccuracy, mistake, or blunder when Lichess-style judgement applies
     std::string best_move;  // Stockfish's preferred move
     int cp_loss = 0;        // Centipawn loss (how much worse the move is)
 };

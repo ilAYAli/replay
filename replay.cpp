@@ -1,14 +1,18 @@
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
-#include <future>
+#include <map>
+#include <optional>
 #include <regex>
 #include <stdexcept>
 #include <string>
+#include <sstream>
 #include <vector>
 #include <cstdio>
 #include <cmath>
 #include <chrono>
+#include <cctype>
 #include <memory>
 #include <array>
 #include <poll.h>
@@ -77,6 +81,45 @@ struct ValidationStats {
     std::string worst_label;
 };
 
+struct AnalysisReportEntry {
+    std::string label;
+    std::string played_uci;
+    std::string played_move;
+    std::string best_uci;
+    std::string best_move;
+    std::string fen;
+};
+
+struct AnalysisReportWidths {
+    size_t played_uci = 4;
+    size_t played_move = 8;
+    size_t best_uci = 4;
+    size_t best_move = 8;
+};
+
+struct LoggedMoveRecord {
+    int move_no = 0;
+    std::string position;
+    std::string move;
+    int depth = 1;
+};
+
+struct PositionTurn {
+    int fullmove = 1;
+    char side = 'w';
+};
+
+struct LichessAdvice {
+    std::string label;
+    std::string played_san;
+    std::string best_san;
+};
+
+struct LichessAnalysis {
+    std::string game_id;
+    std::map<std::pair<int, char>, LichessAdvice> advices;
+};
+
 int moveCountFromPosition(const std::string& position) {
     size_t moves_pos = position.find(" moves ");
     if (moves_pos == std::string::npos)
@@ -123,6 +166,197 @@ std::string appendMoveToPosition(const std::string& position, const std::string&
     return position + " moves " + move;
 }
 
+bool endsWith(const std::string& value, const std::string& suffix) {
+    return value.size() >= suffix.size()
+        && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string trim(std::string value) {
+    size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return "";
+    size_t last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::optional<std::string> labelFromMoveToken(const std::string& token) {
+    if (endsWith(token, "??"))
+        return "blunder";
+    if (endsWith(token, "?!"))
+        return "inaccuracy";
+    if (endsWith(token, "?"))
+        return "mistake";
+    return std::nullopt;
+}
+
+std::string stripMoveGlyph(std::string token) {
+    if (endsWith(token, "??") || endsWith(token, "?!") || endsWith(token, "!?"))
+        token.resize(token.size() - 2);
+    else if (endsWith(token, "?") || endsWith(token, "!"))
+        token.resize(token.size() - 1);
+    return token;
+}
+
+std::optional<std::string> extractBestSan(const std::string& comment) {
+    std::string marker = " was best.";
+    size_t end = comment.find(marker);
+    if (end == std::string::npos)
+        return std::nullopt;
+
+    size_t start = comment.find_last_of(" \t\r\n", end == 0 ? 0 : end - 1);
+    if (start == std::string::npos)
+        start = 0;
+    else
+        start++;
+
+    std::string best = trim(comment.substr(start, end - start));
+    if (best.empty())
+        return std::nullopt;
+    return best;
+}
+
+std::map<std::pair<int, char>, LichessAdvice> parseLichessAdvices(const std::string& pgn) {
+    std::map<std::pair<int, char>, LichessAdvice> advices;
+    std::regex annotated_move(R"((\d+)\.(\.\.)?\s+([^\s\{\(\)]+)\s*\{([^{}]*was best\.)\s*\})");
+
+    for (std::sregex_iterator it(pgn.begin(), pgn.end(), annotated_move), end; it != end; ++it) {
+        int fullmove = std::stoi((*it)[1].str());
+        char side = (*it)[2].matched ? 'b' : 'w';
+        std::string token = (*it)[3].str();
+        std::string comment = (*it)[4].str();
+
+        auto label = labelFromMoveToken(token);
+        auto best_san = extractBestSan(comment);
+        if (!label || !best_san)
+            continue;
+
+        advices[{fullmove, side}] = {*label, stripMoveGlyph(token), *best_san};
+    }
+
+    return advices;
+}
+
+std::optional<std::string> readTextFile(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    if (!in.is_open())
+        return std::nullopt;
+
+    std::ostringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
+bool isLikelyLichessGameId(const std::string& value) {
+    if (value.size() < 8 || value.size() > 12)
+        return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isalnum(ch);
+    });
+}
+
+std::optional<std::string> extractGameIdFromText(const std::string& text) {
+    std::regex game_id_tag(R"PGN(\[GameId\s+"([A-Za-z0-9]{8,12})"\])PGN");
+    std::smatch match;
+    if (std::regex_search(text, match, game_id_tag))
+        return match[1].str();
+
+    std::regex site_id(R"(lichess\.org/(?:game/export/)?([A-Za-z0-9]{8,12}))");
+    if (std::regex_search(text, match, site_id))
+        return match[1].str();
+
+    return std::nullopt;
+}
+
+std::optional<std::string> extractGameIdFromPath(const std::string& logfile) {
+    std::string stem = std::filesystem::path(logfile).stem().string();
+    std::regex trailing_id(R"(([A-Za-z0-9]{8,12})$)");
+    std::smatch match;
+    if (std::regex_search(stem, match, trailing_id) && isLikelyLichessGameId(match[1].str()))
+        return match[1].str();
+    return std::nullopt;
+}
+
+std::optional<std::string> fetchLichessPgn(const std::string& game_id) {
+    if (!isLikelyLichessGameId(game_id))
+        return std::nullopt;
+
+    std::string command = fmt::format(
+        "curl -fsSL 'https://lichess.org/game/export/{}?evals=1&clocks=0&literate=1'",
+        game_id);
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe)
+        return std::nullopt;
+
+    std::string output;
+    std::array<char, 4096> buffer{};
+    while (fgets(buffer.data(), (int)buffer.size(), pipe))
+        output += buffer.data();
+
+    int rc = pclose(pipe);
+    if (rc != 0 || output.empty())
+        return std::nullopt;
+
+    return output;
+}
+
+std::optional<LichessAnalysis> loadLichessAnalysis(const std::string& logfile) {
+    std::optional<std::string> game_id;
+
+    std::filesystem::path pgn_path(logfile);
+    pgn_path.replace_extension(".pgn");
+    if (auto local_pgn = readTextFile(pgn_path)) {
+        auto advices = parseLichessAdvices(*local_pgn);
+        game_id = extractGameIdFromText(*local_pgn);
+        if (!advices.empty())
+            return LichessAnalysis{game_id.value_or("local-pgn"), std::move(advices)};
+    }
+
+    game_id = game_id ? game_id : extractGameIdFromPath(logfile);
+    if (!game_id)
+        return std::nullopt;
+
+    auto fetched_pgn = fetchLichessPgn(*game_id);
+    if (!fetched_pgn)
+        return std::nullopt;
+
+    auto advices = parseLichessAdvices(*fetched_pgn);
+    if (advices.empty())
+        return std::nullopt;
+
+    return LichessAnalysis{*game_id, std::move(advices)};
+}
+
+PositionTurn positionTurn(const std::string& position) {
+    PositionTurn turn;
+    std::vector<std::string> moves;
+    size_t moves_pos = position.find(" moves ");
+    std::string head = moves_pos == std::string::npos
+        ? position
+        : position.substr(0, moves_pos);
+
+    if (head.rfind("position fen ", 0) == 0) {
+        std::istringstream fen(head.substr(13));
+        std::string board, side, castling, ep, halfmove, fullmove;
+        fen >> board >> side >> castling >> ep >> halfmove >> fullmove;
+        if (side == "b")
+            turn.side = 'b';
+        if (!fullmove.empty())
+            turn.fullmove = std::stoi(fullmove);
+    }
+
+    if (moves_pos != std::string::npos) {
+        std::istringstream move_stream(position.substr(moves_pos + 7));
+        std::string move;
+        while (move_stream >> move) {
+            if (turn.side == 'b')
+                turn.fullmove++;
+            turn.side = turn.side == 'w' ? 'b' : 'w';
+        }
+    }
+
+    return turn;
+}
+
 std::string extractMove(const std::string& line) {
     size_t bestMovePos = line.find("bestmove ");
     if (bestMovePos != std::string::npos) {
@@ -136,6 +370,143 @@ std::string extractMove(const std::string& line) {
         return move;
     }
     return "";
+}
+
+std::string piecePrefix(char piece) {
+    switch (piece) {
+    case 'P':
+    case 'p':
+        return "";
+    case 'N':
+    case 'n':
+        return "N";
+    case 'B':
+    case 'b':
+        return "B";
+    case 'R':
+    case 'r':
+        return "R";
+    case 'Q':
+    case 'q':
+        return "Q";
+    case 'K':
+    case 'k':
+        return "K";
+    default:
+        return "";
+    }
+}
+
+char pieceAt(const std::string& fen, char file_char, char rank_char) {
+    int target_file = file_char - 'a';
+    int target_rank = rank_char - '0';
+    if (target_file < 0 || target_file > 7 || target_rank < 1 || target_rank > 8)
+        return '\0';
+
+    std::string board = fen.substr(0, fen.find(' '));
+    int row = 0;
+    int file = 0;
+    int target_row = 8 - target_rank;
+
+    for (char square : board) {
+        if (square == '/') {
+            row++;
+            file = 0;
+            continue;
+        }
+        if (square >= '1' && square <= '8') {
+            file += square - '0';
+            continue;
+        }
+        if (row == target_row && file == target_file)
+            return square;
+        file++;
+    }
+
+    return '\0';
+}
+
+std::string coordinateMove(const std::string& fen, const std::string& move) {
+    if (move.size() < 4)
+        return move;
+    if (move[0] < 'a' || move[0] > 'h' || move[2] < 'a' || move[2] > 'h'
+     || move[1] < '1' || move[1] > '8' || move[3] < '1' || move[3] > '8')
+        return move;
+
+    std::string from = move.substr(0, 2);
+    std::string to = move.substr(2, 2);
+    char piece = pieceAt(fen, move[0], move[1]);
+
+    if ((piece == 'K' || piece == 'k') && from[0] == 'e' && (to[0] == 'g' || to[0] == 'c'))
+        return to[0] == 'g' ? "O-O" : "O-O-O";
+
+    std::string suffix;
+    if (move.size() >= 5)
+        suffix = fmt::format("={}", (char)std::toupper((unsigned char)move[4]));
+
+    return fmt::format("{}{}-{}{}", piecePrefix(piece), from, to, suffix);
+}
+
+AnalysisReportEntry makeAnalysisReportEntry(const MoveValidation& validation, const std::string& move, const std::string& fen) {
+    AnalysisReportEntry entry;
+    entry.label = validation.label;
+    entry.played_uci = move;
+    entry.played_move = coordinateMove(fen, move);
+    entry.best_uci = validation.best_move;
+    entry.best_move = coordinateMove(fen, validation.best_move);
+    entry.fen = fen;
+    return entry;
+}
+
+AnalysisReportWidths analysisReportWidths(const std::vector<AnalysisReportEntry>& report) {
+    AnalysisReportWidths widths;
+    for (const auto& entry : report) {
+        widths.played_uci = std::max(widths.played_uci, entry.played_uci.size());
+        widths.played_move = std::max(widths.played_move, entry.played_move.size());
+        widths.best_uci = std::max(widths.best_uci, entry.best_uci.size());
+        widths.best_move = std::max(widths.best_move, entry.best_move.size());
+    }
+    return widths;
+}
+
+std::string formatAnalysisReportEntry(const AnalysisReportEntry& entry, const AnalysisReportWidths& widths) {
+    return fmt::format("{:<11} {:<{}}  {:<{}}  best: {:<{}}  {:<{}}  FEN: {}",
+                       entry.label + ":", entry.played_uci, widths.played_uci,
+                       entry.played_move, widths.played_move,
+                       entry.best_uci, widths.best_uci,
+                       entry.best_move, widths.best_move,
+                       entry.fen);
+}
+
+std::filesystem::path analysisPathForLog(const std::string& logfile) {
+    std::filesystem::path path(logfile);
+    if (path.extension() == ".log")
+        path.replace_extension(".analysis");
+    else
+        path += ".analysis";
+    return path;
+}
+
+void writeAnalysisReport(const std::filesystem::path& path, const std::vector<AnalysisReportEntry>& report) {
+    std::ofstream out(path);
+    if (!out.is_open())
+        throw std::runtime_error(fmt::format("Failed to write analysis file: {}", path.string()));
+
+    if (report.empty()) {
+        out << "No inaccuracies, mistakes, or blunders.\n";
+        return;
+    }
+
+    AnalysisReportWidths widths = analysisReportWidths(report);
+    for (const auto& entry : report)
+        out << formatAnalysisReportEntry(entry, widths) << '\n';
+}
+
+bool isReportableJudgement(const MoveValidation& validation) {
+    return validation.ok
+        && (validation.label == "inaccuracy"
+         || validation.label == "mistake"
+         || validation.label == "blunder");
 }
 
 class EngineProcess {
@@ -415,6 +786,125 @@ std::string getFen(EngineProcess& engine) {
     }
 }
 
+std::string getFenForPosition(EngineProcess& engine, const std::string& position) {
+    engine.send(position);
+    return getFen(engine);
+}
+
+std::vector<std::string> legalMovesForFen(EngineProcess& engine, const std::string& fen) {
+    std::vector<std::string> moves;
+    engine.send(fmt::format("position fen {}", fen));
+    engine.send("go perft 1");
+
+    while (true) {
+        if (!engine.waitReadable(30000))
+            throw std::runtime_error("Timed out waiting for legal moves");
+
+        std::string line = engine.readLine();
+        if (line.rfind("Nodes searched:", 0) == 0)
+            break;
+
+        size_t colon = line.find(':');
+        if (colon == std::string::npos)
+            continue;
+
+        std::string move = line.substr(0, colon);
+        if (move.size() >= 4)
+            moves.push_back(move);
+    }
+
+    return moves;
+}
+
+std::string normalizeSan(std::string san) {
+    san = trim(san);
+    while (!san.empty() && (san.back() == '+' || san.back() == '#' || san.back() == '!' || san.back() == '?'))
+        san.pop_back();
+    if (san == "0-0")
+        return "O-O";
+    if (san == "0-0-0")
+        return "O-O-O";
+    return san;
+}
+
+std::optional<std::string> uciForSan(EngineProcess& engine, const std::string& fen, const std::string& san) {
+    std::string clean = normalizeSan(san);
+    auto legal_moves = legalMovesForFen(engine, fen);
+
+    if (clean == "O-O" || clean == "O-O-O") {
+        char rank = fen.find(" b ") != std::string::npos ? '8' : '1';
+        std::string target = clean == "O-O" ? fmt::format("e{}g{}", rank, rank)
+                                            : fmt::format("e{}c{}", rank, rank);
+        auto found = std::find(legal_moves.begin(), legal_moves.end(), target);
+        if (found != legal_moves.end())
+            return *found;
+        return std::nullopt;
+    }
+
+    char promotion = '\0';
+    size_t promotion_pos = clean.find('=');
+    if (promotion_pos != std::string::npos && promotion_pos + 1 < clean.size()) {
+        promotion = (char)std::toupper((unsigned char)clean[promotion_pos + 1]);
+        clean = clean.substr(0, promotion_pos);
+    }
+
+    std::string san_no_capture;
+    for (char ch : clean) {
+        if (ch != 'x')
+            san_no_capture.push_back(ch);
+    }
+
+    size_t dest_pos = std::string::npos;
+    for (size_t i = 0; i + 1 < san_no_capture.size(); ++i) {
+        if (san_no_capture[i] >= 'a' && san_no_capture[i] <= 'h'
+         && san_no_capture[i + 1] >= '1' && san_no_capture[i + 1] <= '8') {
+            dest_pos = i;
+        }
+    }
+    if (dest_pos == std::string::npos)
+        return std::nullopt;
+
+    std::string dest = san_no_capture.substr(dest_pos, 2);
+    char piece = 'P';
+    size_t prefix_start = 0;
+    if (!san_no_capture.empty()
+     && (san_no_capture[0] == 'K' || san_no_capture[0] == 'Q' || san_no_capture[0] == 'R'
+      || san_no_capture[0] == 'B' || san_no_capture[0] == 'N')) {
+        piece = san_no_capture[0];
+        prefix_start = 1;
+    }
+
+    std::string disambiguation = san_no_capture.substr(prefix_start, dest_pos - prefix_start);
+
+    for (const auto& move : legal_moves) {
+        if (move.size() < 4 || move.substr(2, 2) != dest)
+            continue;
+        if (promotion != '\0' && (move.size() < 5 || std::toupper((unsigned char)move[4]) != promotion))
+            continue;
+        if (promotion == '\0' && move.size() >= 5)
+            continue;
+
+        char from_piece = pieceAt(fen, move[0], move[1]);
+        if (std::toupper((unsigned char)from_piece) != piece)
+            continue;
+
+        if (disambiguation.size() == 1) {
+            char hint = disambiguation[0];
+            if (hint >= 'a' && hint <= 'h' && move[0] != hint)
+                continue;
+            if (hint >= '1' && hint <= '8' && move[1] != hint)
+                continue;
+        } else if (disambiguation.size() == 2) {
+            if (move[0] != disambiguation[0] || move[1] != disambiguation[1])
+                continue;
+        }
+
+        return move;
+    }
+
+    return std::nullopt;
+}
+
 void printBoard(EngineProcess& engine) {
     engine.send("d");
     while (true) {
@@ -437,8 +927,10 @@ int main(int argc, char* argv[]) {
     bool print_only = false;
     bool print_pgn = false;
     bool time_mode = false;  // --time: replay original `go wtime...` instead of `go depth N`
-    bool validate = true;   // Validate by default if reference engine is found
+    bool validate = true;   // Analyze by default if reference engine is found
     bool color = false;
+    bool save_analysis = false;
+    bool use_lichess_analysis = false;
     int threads = -1;    // -1 = don't send setoption; otherwise override engine default
     int skip = 0;
     int max_moves = -1;  // -1 = replay all remaining
@@ -452,12 +944,13 @@ int main(int argc, char* argv[]) {
             "\n"
             "Options:\n"
             "  --candidate <path>  Path to the candidate engine binary (default: enyo)\n"
-            "  --reference <path>  Reference engine for validation (default: stockfish)\n"
-            "                      Validates each replayed move at the logged depth.\n"
-            "                      Scores < 50%% labeled as blunders, < 75%% as misses.\n"
-            "  --no-validate       Disable validation even if reference engine is available\n"
-            "  --skip N            Skip the first N moves in the log. NOTE: this jumps\n"
-            "                      straight to move N+1 with a fresh engine, so TT,\n"
+            "  --reference <path>  Reference engine for local analysis (default: stockfish)\n"
+            "                      Analyzes logged moves at the end, at logged depth.\n"
+            "                      Labels inaccuracies, mistakes, and blunders using\n"
+            "                      Lichess-style winning-chance loss thresholds.\n"
+            "  --no-analysis       Replay only; do not generate the end analysis report\n"
+            "  --skip N            Skip to the first logged position after fullmove N.\n"
+            "                      NOTE: this jumps straight to that move with a fresh engine, so TT,\n"
             "                      history, and time state do NOT match the original\n"
             "                      run. Do not use --skip to reproduce state-dependent\n"
             "                      bugs (fallbacks, time-management, TT-driven moves).\n"
@@ -465,6 +958,8 @@ int main(int argc, char* argv[]) {
             "  --count N           Alias for --moves\n"
             "  --print             Print the log's bestmoves and exit (no engine run)\n"
             "  --pgn               Print PGN for the replayed logged moves at the end\n"
+            "  --save-analysis     Save analysis beside the log as <name>.analysis\n"
+            "  --lichess-analysis  Use Lichess annotated export for the end report\n"
             "  --time              Replay with the original `go wtime X btime Y winc Z binc W`\n"
             "                      command from the log, not `go depth N`. Needed to reproduce\n"
             "                      timeout-driven fallbacks (e.g. empty-PV bestmove fallbacks).\n"
@@ -488,10 +983,8 @@ int main(int argc, char* argv[]) {
             engine_path = argv[++i];
         } else if ((arg == "--reference" || arg == "--validator") && i + 1 < argc) {
             reference_path = argv[++i];
-        } else if (arg == "--no-validate") {
+        } else if (arg == "--no-analysis") {
             validate = false;
-        } else if (arg == "--validate") {
-            validate = true;  // Keep for backward compatibility
         } else if (arg == "--verbose" || arg == "-v") {
             quiet = false;
         } else if (arg == "--gui") {
@@ -500,6 +993,10 @@ int main(int argc, char* argv[]) {
             print_only = true;
         } else if (arg == "--pgn") {
             print_pgn = true;
+        } else if (arg == "--save-analysis") {
+            save_analysis = true;
+        } else if (arg == "--lichess-analysis") {
+            use_lichess_analysis = true;
         } else if (arg == "--time") {
             time_mode = true;
         } else if (arg == "--color") {
@@ -528,6 +1025,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (!validate && save_analysis) {
+        fmt::print(stderr, "ERROR: --save-analysis cannot be used with --no-analysis\n");
+        return 1;
+    }
+
+    if (!validate && use_lichess_analysis) {
+        fmt::print(stderr, "ERROR: --lichess-analysis cannot be used with --no-analysis\n");
+        return 1;
+    }
+
     std::ifstream file(logfile);
     if (!file.is_open()) {
         fmt::print(stderr, "ERROR: Failed to open logfile: {}\n", logfile);
@@ -536,6 +1043,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::string> commands;
     std::vector<std::string> bestmoves;
+    std::vector<int> move_numbers;
     std::string line;
     std::streampos firstUciNewGamePos = -1;
 
@@ -628,6 +1136,7 @@ int main(int argc, char* argv[]) {
 
                 commands.push_back(current_position);
                 commands.push_back(fmt::format("go depth {}", depth));
+                move_numbers.push_back(positionTurn(current_position).fullmove);
                 timings.push_back({wtime_ms, btime_ms, winc_ms, binc_ms,
                                    last_time_ms, side, original_go});
                 current_position = ""; // Clear so we don't add same position twice
@@ -657,34 +1166,37 @@ int main(int argc, char* argv[]) {
     }
 
     int total_moves = (int)bestmoves.size();  // original count, preserved for display
+    int display_total_move = move_numbers.empty() ? total_moves : move_numbers.back();
 
     if (skip > 0) {
-        if (skip >= total_moves) {
-            fmt::print(stderr, "ERROR: --skip {} >= total moves {}\n", skip, total_moves);
+        auto first_remaining = std::upper_bound(move_numbers.begin(), move_numbers.end(), skip);
+        int skipped_entries = (int)std::distance(move_numbers.begin(), first_remaining);
+        if (skipped_entries >= total_moves) {
+            fmt::print(stderr, "ERROR: --skip {} leaves no positions after fullmove {}\n", skip, skip);
             return 1;
         }
-        // commands is [position, go, position, go, ...] — drop 2*skip entries
-        commands.erase(commands.begin(), commands.begin() + 2 * skip);
-        bestmoves.erase(bestmoves.begin(), bestmoves.begin() + skip);
-        if ((int)timings.size() >= skip) {
-            timings.erase(timings.begin(), timings.begin() + skip);
-        }
-        fmt::print("Skipping first {} moves; {} remaining\n", skip, bestmoves.size());
+        // commands is [position, go, position, go, ...] — drop 2 entries per skipped position.
+        commands.erase(commands.begin(), commands.begin() + 2 * skipped_entries);
+        bestmoves.erase(bestmoves.begin(), bestmoves.begin() + skipped_entries);
+        move_numbers.erase(move_numbers.begin(), move_numbers.begin() + skipped_entries);
+        if ((int)timings.size() >= skipped_entries)
+            timings.erase(timings.begin(), timings.begin() + skipped_entries);
+        fmt::print("Skipping to fullmove {}; skipped {} log entries; {} remaining\n",
+                   skip + 1, skipped_entries, bestmoves.size());
     }
 
     if (max_moves >= 0 && (int)bestmoves.size() > max_moves) {
         commands.erase(commands.begin() + 2 * max_moves, commands.end());
         bestmoves.erase(bestmoves.begin() + max_moves, bestmoves.end());
-        if ((int)timings.size() > max_moves) {
+        move_numbers.erase(move_numbers.begin() + max_moves, move_numbers.end());
+        if ((int)timings.size() > max_moves)
             timings.erase(timings.begin() + max_moves, timings.end());
-        }
         fmt::print("Limiting to {} moves\n", max_moves);
     }
 
     if (print_only) {
-        for (size_t m = 0; m < bestmoves.size(); ++m) {
-            fmt::print("[{}/{}] {}\n", skip + (int)m + 1, total_moves, bestmoves[m]);
-        }
+        for (size_t m = 0; m < bestmoves.size(); ++m)
+            fmt::print("[{}/{}] {}\n", move_numbers[m], display_total_move, bestmoves[m]);
         return 0;
     }
 
@@ -730,7 +1242,6 @@ int main(int argc, char* argv[]) {
             engine.send(opt);
         }
 
-        std::unique_ptr<ValidatorWorker> validator;
         if (validate) {
             // Check if validator exists - handle both absolute paths and PATH lookups
             bool validator_found = false;
@@ -746,12 +1257,23 @@ int main(int argc, char* argv[]) {
             if (!validator_found) {
                 fmt::print(stderr, "ERROR: Reference engine '{}' not found or not executable\n", reference_path);
                 fmt::print(stderr, "Please install Stockfish or specify a different reference engine with --reference <path>\n");
-                fmt::print(stderr, "Or use --no-validate to disable validation\n");
+                fmt::print(stderr, "Or use --no-analysis to disable analysis\n");
                 return 1;
             }
             if (!quiet && !gui)
-                fmt::print("Using reference engine: {}\n", reference_path);
-            validator = std::make_unique<ValidatorWorker>(reference_path);
+                fmt::print("Using reference engine for end analysis: {}\n", reference_path);
+        }
+
+        std::optional<LichessAnalysis> lichess_analysis;
+        if (validate && use_lichess_analysis) {
+            lichess_analysis = loadLichessAnalysis(logfile);
+            if (!lichess_analysis) {
+                fmt::print(stderr, "ERROR: Could not load Lichess annotated analysis for '{}'\n", logfile);
+                fmt::print(stderr, "       Expected a sibling annotated .pgn or a Lichess game id in the filename/PGN.\n");
+                return 1;
+            }
+            if (!quiet && !gui)
+                fmt::print("Using Lichess analysis: {}\n", lichess_analysis->game_id);
         }
 
         int bestmoveIndex = 0;
@@ -760,6 +1282,8 @@ int main(int argc, char* argv[]) {
         std::string current_position = "";
         std::string pgn_position = "";
         ValidationStats validation_stats;
+        std::vector<AnalysisReportEntry> analysis_report;
+        std::vector<LoggedMoveRecord> logged_moves;
 
         int mismatches = 0;
         double min_wdl = 0.0;   // worst for White
@@ -806,7 +1330,10 @@ int main(int argc, char* argv[]) {
                 }
                 expected_preview = (bestmoveIndex < bestmoves.size()) ? bestmoves[bestmoveIndex] : "";
                 if (!quiet && !gui) {
-                    fmt::print("[{}/{}] ", skip + bestmoveIndex + 1, total_moves);
+                    int move_no = bestmoveIndex < (int)move_numbers.size()
+                        ? move_numbers[bestmoveIndex]
+                        : bestmoveIndex + 1;
+                    fmt::print("[{}/{}] ", move_no, display_total_move);
                 }
             }
 
@@ -824,7 +1351,10 @@ int main(int argc, char* argv[]) {
                     const auto& t = timings[bestmoveIndex];
                     budget_ms = (t.side == "White") ? t.wtime_ms : t.btime_ms;
                 }
-                std::string result = engine.waitForBestmove(skip + bestmoveIndex + 1, total_moves, current_position, expected_preview, budget_ms);
+                int display_move_no = bestmoveIndex < (int)move_numbers.size()
+                    ? move_numbers[bestmoveIndex]
+                    : bestmoveIndex + 1;
+                std::string result = engine.waitForBestmove(display_move_no, display_total_move, current_position, expected_preview, budget_ms);
 
                 // Parse bestmove|score|wdl|mate_in format
                 std::vector<std::string> parts;
@@ -839,21 +1369,18 @@ int main(int argc, char* argv[]) {
                 double wdl = parts.size() > 2 ? std::stod(parts[2]) : 0.0;
                 int mate_in = parts.size() > 3 ? std::stoi(parts[3]) : 0;
 
-                // Submit validation for the replayed bestmove (not the logged one)
-                std::future<MoveValidation> pending_validation;
-                int validation_depth = -1;
-                if (validate && validator && !bestmove.empty()) {
-                    validation_depth = std::max(1, parseIntField(cmd, "depth"));
-                    pending_validation = validator->submit(current_position, bestmove, validation_depth);
-                }
                 if (bestmoveIndex >= bestmoves.size()) {
                     fmt::print("ERROR: No expected bestmove for position {}\n", bestmoveIndex);
                     break;
                 }
 
+                int move_no = bestmoveIndex < (int)move_numbers.size()
+                    ? move_numbers[bestmoveIndex]
+                    : bestmoveIndex + 1;
                 std::string expected = bestmoves[bestmoveIndex++];
-                int move_no = skip + bestmoveIndex;
                 pgn_position = appendMoveToPosition(current_position, expected);
+                int validation_depth = std::max(1, parseIntField(cmd, "depth"));
+                logged_moves.push_back({move_no, current_position, expected, validation_depth});
 
                 // Track summary stats
                 had_any_move = true;
@@ -869,54 +1396,14 @@ int main(int argc, char* argv[]) {
                     fmt::print("\r\033[K");  // Clear the in-progress "thinking" line
                 }
 
-                MoveValidation move_validation;
-                if (validate && pending_validation.valid()) {
-                    if (quiet && !gui
-                     && pending_validation.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-                        fmt::print("\r\033[KSF validating [{:2}/{:2}] depth {:2}",
-                                   move_no, total_moves, validation_depth);
-                        fflush(stdout);
-                    }
-
-                    move_validation = pending_validation.get();
-
-                    if (quiet && !gui)
-                        fmt::print("\r\033[K");
-
-                    if (move_validation.ok) {
-                        validation_stats.count++;
-                        validation_stats.quality_total += move_validation.quality;
-                        if (move_validation.quality < validation_stats.worst_quality) {
-                            validation_stats.worst_quality = move_validation.quality;
-                            validation_stats.worst_move_no = move_no;
-                            validation_stats.worst_move = bestmove;  // Track the replayed move
-                            validation_stats.worst_label = move_validation.label;
-                        }
-                    } else {
-                        validation_stats.failures++;
-                    }
-                }
-
                 std::string move_line = (bestmove != expected)
                     ? fmt::format("[{}/{}] bestmove {} (EXPECTED: {}) | WDL {:+.2f}",
-                                  move_no, total_moves, bestmove, expected, wdl)
+                                  move_no, display_total_move, bestmove, expected, wdl)
                     : fmt::format("[{}/{}] bestmove {} | WDL {:+.2f}",
-                                  move_no, total_moves, bestmove, wdl);
-                if (validate)
-                    move_line += formatValidation(move_validation, color);
+                                  move_no, display_total_move, bestmove, wdl);
 
                 if (!gui) {
                     fmt::print("{}\n", move_line);
-                    
-                    // Print FEN for blunders and misses to help with analysis
-                    if (validate && move_validation.ok && move_validation.quality < 75.0) {
-                        std::string fen = getFen(engine);
-                        fmt::print("  Position FEN: {}\n", fen);
-                        fmt::print("  CP loss: -{} (evaluation dropped by {:.2f} pawns)\n", 
-                                   move_validation.cp_loss, move_validation.cp_loss / 100.0);
-                        fmt::print("  Analyze at: https://lichess.org/analysis/{}\n", 
-                                   std::regex_replace(fen, std::regex(" "), "_"));
-                    }
                 }
 
                 // Show board after move in gui mode
@@ -924,6 +1411,64 @@ int main(int argc, char* argv[]) {
                     fmt::print("\033[2J\033[H");  // Clear screen and move to top
                     printBoard(engine);
                     fmt::print("\n{}\n", move_line);
+                }
+            }
+        }
+
+        if (had_any_move && validate && use_lichess_analysis) {
+            EngineProcess legal_engine(reference_path, true, false);
+            initializeUciEngine(legal_engine, false);
+
+            for (const auto& record : logged_moves) {
+                PositionTurn turn = positionTurn(record.position);
+                auto advice = lichess_analysis->advices.find({turn.fullmove, turn.side});
+                if (advice == lichess_analysis->advices.end())
+                    continue;
+
+                std::string fen = getFenForPosition(engine, record.position);
+                std::string best_uci = uciForSan(legal_engine, fen, advice->second.best_san)
+                    .value_or(advice->second.best_san);
+
+                AnalysisReportEntry entry;
+                entry.label = advice->second.label;
+                entry.played_uci = record.move;
+                entry.played_move = coordinateMove(fen, record.move);
+                entry.best_uci = best_uci;
+                entry.best_move = coordinateMove(fen, best_uci);
+                entry.fen = fen;
+                analysis_report.push_back(entry);
+            }
+        } else if (had_any_move && validate) {
+            auto validator = std::make_unique<ValidatorWorker>(reference_path);
+            for (const auto& record : logged_moves) {
+                if (quiet && !gui) {
+                    fmt::print("\r\033[KSF analyzing [{:2}/{:2}] depth {:2}",
+                               record.move_no, display_total_move, record.depth);
+                    fflush(stdout);
+                }
+
+                MoveValidation validation = validator->submit(record.position, record.move, record.depth).get();
+
+                if (quiet && !gui)
+                    fmt::print("\r\033[K");
+
+                if (validation.ok) {
+                    validation_stats.count++;
+                    validation_stats.quality_total += validation.quality;
+                    if (validation.quality < validation_stats.worst_quality) {
+                        validation_stats.worst_quality = validation.quality;
+                        validation_stats.worst_move_no = record.move_no;
+                        validation_stats.worst_move = record.move;
+                        validation_stats.worst_label = validation.label;
+                    }
+                } else {
+                    validation_stats.failures++;
+                    continue;
+                }
+
+                if (isReportableJudgement(validation)) {
+                    std::string fen = getFenForPosition(engine, record.position);
+                    analysis_report.push_back(makeAnalysisReportEntry(validation, record.move, fen));
                 }
             }
         }
@@ -950,16 +1495,16 @@ int main(int argc, char* argv[]) {
             fmt::print("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl);
             if (final_is_mate) {
                 int plies = std::abs(final_mate_in);
-                // Engine's mate score is from side-to-move's POV; side-to-move
-                // is the opposite of whoever just moved.
-                std::string stm = (final_side == "White") ? "Black" : "White";
-                std::string winner = (final_mate_in > 0) ? stm : final_side;
+                std::string next_side = (final_side == "White") ? "Black" : "White";
+                std::string winner = (final_mate_in > 0) ? final_side : next_side;
                 fmt::print("Mate               : {} mates in {} {}\n",
                            winner, plies, plies == 1 ? "ply" : "plies");
             }
 
             if (validate) {
-                if (validation_stats.count > 0) {
+                if (use_lichess_analysis && lichess_analysis) {
+                    fmt::print("Analysis source    : Lichess {}\n", lichess_analysis->game_id);
+                } else if (validation_stats.count > 0) {
                     double avg_quality = validation_stats.quality_total / (double)validation_stats.count;
                     fmt::print("SF score           : avg {}, worst {}\n",
                                formatQualityPercent(avg_quality, color),
@@ -980,7 +1525,8 @@ int main(int argc, char* argv[]) {
                 int budget = (t.side == "White") ? t.wtime_ms : t.btime_ms;
                 if (budget <= 0 || t.search_time_ms < 0) continue;
                 if (t.search_time_ms >= budget) {
-                    overruns.push_back({skip + (int)m + 1, &t});
+                    int move_no = m < move_numbers.size() ? move_numbers[m] : (int)m + 1;
+                    overruns.push_back({move_no, &t});
                 }
             }
             if (!overruns.empty()) {
@@ -997,6 +1543,22 @@ int main(int argc, char* argv[]) {
             fmt::print("\n=== PGN ===\n");
             engine.send(pgn_position);
             engine.printPgn();
+        }
+
+        if (had_any_move && validate) {
+            fmt::print("\n=== Analysis ===\n");
+            if (analysis_report.empty()) {
+                fmt::print("No inaccuracies, mistakes, or blunders.\n");
+            } else {
+                AnalysisReportWidths widths = analysisReportWidths(analysis_report);
+                for (const auto& entry : analysis_report)
+                    fmt::print("{}\n", formatAnalysisReportEntry(entry, widths));
+            }
+            if (save_analysis) {
+                std::filesystem::path analysis_path = analysisPathForLog(logfile);
+                writeAnalysisReport(analysis_path, analysis_report);
+                fmt::print("Analysis saved     : {}\n", analysis_path.string());
+            }
         }
 
     } catch (const std::exception& e) {

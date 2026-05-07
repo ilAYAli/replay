@@ -315,7 +315,7 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
     }
 
     if (validation.cp_loss > 0)
-        return fmt::format(" | SF loss {}cp", validation.cp_loss);
+        return fmt::format(" | SF loss {}cp | best: {}", validation.cp_loss, validation.bestmove);
 
     return " | " + colorizeJudgement("SF best", "best", color);
 }
@@ -679,7 +679,7 @@ MoveValidation validateMove(EngineProcess& reference,
     int played_cp = scoreAsCp(played_score);
 
     validation.ok = true;
-    validation.cp_loss = std::max(0, best_cp - played_cp);
+    validation.cp_loss = std::clamp(best_cp - played_cp, 0, 1000);
     validation.label = lichessJudgement(best_score, played_score);
     return validation;
 }

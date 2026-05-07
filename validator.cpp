@@ -349,9 +349,6 @@ MoveValidation validateMove(UciProcess& validator, const std::string& position, 
         return validation;
     }
 
-    validator.send("ucinewgame");
-    waitForReady(validator);
-
     SearchResult before = searchDepth(validator, position, search_depth);
     if (!before.has_score) {
         validation.error = "validator returned no score";

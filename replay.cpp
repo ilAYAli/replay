@@ -781,12 +781,16 @@ void initializeEngine(EngineProcess& engine,
         fmt::print("\n");
 }
 
-void initializeReference(EngineProcess& engine) {
-    engine.send("uci");
-    waitForToken(engine, "uciok");
+void resetReference(EngineProcess& engine) {
     engine.send("ucinewgame");
     engine.send("isready");
     waitForToken(engine, "readyok");
+}
+
+void initializeReference(EngineProcess& engine) {
+    engine.send("uci");
+    waitForToken(engine, "uciok");
+    resetReference(engine);
 }
 
 void updateReferenceScore(ReferenceResult& result, const std::string& line, int stm_sign) {
@@ -825,6 +829,7 @@ ReferenceResult referenceSearch(EngineProcess& engine,
         fflush(stdout);
     }
 
+    resetReference(engine);
     engine.send(position);
     engine.send(fmt::format("go depth {}", target_depth));
 

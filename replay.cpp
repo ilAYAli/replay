@@ -7,6 +7,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <fcntl.h>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
@@ -565,6 +566,13 @@ public:
         if (pid == 0) {
             dup2(pipe_to_engine[0], STDIN_FILENO);
             dup2(pipe_from_engine[1], STDOUT_FILENO);
+            if (!verbose) {
+                int devnull = open("/dev/null", O_WRONLY);
+                if (devnull >= 0) {
+                    dup2(devnull, STDERR_FILENO);
+                    close(devnull);
+                }
+            }
             signal(SIGPIPE, SIG_DFL);
 
             close(pipe_to_engine[0]);
@@ -804,12 +812,21 @@ void updateReferenceScore(ReferenceResult& result, const std::string& line, int 
 
 ReferenceResult referenceSearch(EngineProcess& engine,
                                 const std::string& position,
-                                int depth) {
+                                int depth,
+                                bool progress,
+                                const std::string& progress_text) {
     ReferenceResult result;
     int stm_sign = sideToMoveSign(position);
+    int target_depth = std::max(1, depth);
+    int last_reported_depth = -1;
+
+    if (progress) {
+        fmt::print("\r\033[K{} depth 0/{}", progress_text, target_depth);
+        fflush(stdout);
+    }
 
     engine.send(position);
-    engine.send(fmt::format("go depth {}", std::max(1, depth)));
+    engine.send(fmt::format("go depth {}", target_depth));
 
     while (true) {
         auto line = engine.readLine();
@@ -817,6 +834,14 @@ ReferenceResult referenceSearch(EngineProcess& engine,
             throw std::runtime_error("reference engine stopped during search");
 
         updateReferenceScore(result, *line, stm_sign);
+        if (progress && line->find("info depth ") != std::string::npos) {
+            int current_depth = extractDepth(*line);
+            if (current_depth > 0 && current_depth != last_reported_depth) {
+                last_reported_depth = current_depth;
+                fmt::print("\r\033[K{} depth {}/{}", progress_text, current_depth, target_depth);
+                fflush(stdout);
+            }
+        }
         if (startsWith(*line, "bestmove ")) {
             result.bestmove = extractMove(*line);
             return result;
@@ -827,14 +852,22 @@ ReferenceResult referenceSearch(EngineProcess& engine,
 MoveValidation validateMove(EngineProcess& reference,
                             const std::string& position,
                             const std::string& played_move,
-                            int depth) {
+                            int depth,
+                            int fullmove,
+                            int display_total,
+                            bool progress) {
     MoveValidation validation;
     if (played_move.empty() || played_move == "(none)") {
         validation.error = "no played move";
         return validation;
     }
 
-    ReferenceResult best = referenceSearch(reference, position, depth);
+    ReferenceResult best = referenceSearch(reference,
+                                          position,
+                                          depth,
+                                          progress,
+                                          fmt::format("analyzing [{}/{}] reference-best",
+                                                      fullmove, display_total));
     if (!best.has_score) {
         validation.error = "reference returned no score";
         return validation;
@@ -852,7 +885,12 @@ MoveValidation validateMove(EngineProcess& reference,
         return validation;
     }
 
-    ReferenceResult played = referenceSearch(reference, appendMoveToPosition(position, played_move), depth);
+    ReferenceResult played = referenceSearch(reference,
+                                            appendMoveToPosition(position, played_move),
+                                            depth,
+                                            progress,
+                                            fmt::format("analyzing [{}/{}] played-move",
+                                                        fullmove, display_total));
     if (!played.has_score) {
         validation.error = "reference returned no score";
         return validation;
@@ -1304,13 +1342,13 @@ int main(int argc, char* argv[]) {
             std::string reference_suffix;
             if (analyze) {
                 int depth = analysis_depth > 0 ? analysis_depth : entry.depth;
-                if (progress) {
-                    fmt::print("\r\033[Kanalyzing [{:2}/{:2}] depth {:2}",
-                               entry.fullmove, display_total, depth);
-                    fflush(stdout);
-                }
-
-                MoveValidation validation = validateMove(*reference, entry.position, result.bestmove, depth);
+                MoveValidation validation = validateMove(*reference,
+                                                         entry.position,
+                                                         result.bestmove,
+                                                         depth,
+                                                         entry.fullmove,
+                                                         display_total,
+                                                         progress);
                 if (progress)
                     fmt::print("\r\033[K");
 

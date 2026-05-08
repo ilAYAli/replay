@@ -13,6 +13,9 @@ cmake -S . -B build
 cmake --build build
 ```
 
+By default, the build uses the Enyo source tree at `../enyo` for move
+notation helpers. Override with `-DENYO_SOURCE_DIR=/path/to/enyo` if needed.
+
 ## Examples
 
 Replay one log with `enyo` from `PATH`:
@@ -23,6 +26,8 @@ replay "game.log"
 
 At startup, replay prints the candidate engine UCI id and initialization
 commands so the engine version and applied options are visible.
+Move output keeps UCI first for grepping, with algebraic notation in
+parentheses and the reference engine's best move/score appended when analyzed.
 
 The end report is saved beside the log as
 `game.<engine-tag>_replayed_analysis`. If that file already exists, replay

@@ -6,10 +6,34 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(/opt/homebrew/include/)
 
-add_executable(replay replay.cpp)
+set(ENYO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../enyo" CACHE PATH "Path to Enyo source tree")
 
 find_package(fmt REQUIRED)
-target_link_libraries(replay PRIVATE fmt::fmt-header-only)
+find_package(nlohmann_json REQUIRED)
+
+add_library(enyo_chess STATIC
+    "${ENYO_SOURCE_DIR}/src/fen.cpp"
+    "${ENYO_SOURCE_DIR}/src/board.cpp"
+    "${ENYO_SOURCE_DIR}/magic/magic.cpp"
+    "${ENYO_SOURCE_DIR}/src/pgn.cpp"
+    "${ENYO_SOURCE_DIR}/src/zobrist.cpp"
+)
+target_include_directories(enyo_chess PUBLIC
+    "${ENYO_SOURCE_DIR}/src"
+    "${ENYO_SOURCE_DIR}"
+)
+target_link_libraries(enyo_chess PUBLIC
+    fmt::fmt-header-only
+    nlohmann_json::nlohmann_json
+)
+
+add_executable(replay replay.cpp)
+set_target_properties(replay PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+
+target_link_libraries(replay PRIVATE fmt::fmt-header-only enyo_chess)
 
 string(ASCII 27 Esc)
 set(COLOR_RESET "${Esc}[0m")

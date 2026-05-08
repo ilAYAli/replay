@@ -17,6 +17,10 @@
 #include <vector>
 #include <fmt/format.h>
 
+#include "board.hpp"
+#include "movegen.hpp"
+#include "pgn.hpp"
+
 struct LogEntry {
     std::string position;
     std::string logged_go;
@@ -57,9 +61,12 @@ struct ReferenceResult {
 
 struct MoveValidation {
     bool ok = false;
+    bool reference_best = false;
     std::string error;
     std::string label;
     std::string bestmove;
+    std::string best_display;
+    std::string best_score;
     int cp_loss = 0;
 };
 
@@ -75,6 +82,11 @@ struct AnalysisWidths {
     size_t played = 4;
     size_t best = 4;
     size_t loss = 4;
+};
+
+struct ReplayLineWidths {
+    size_t fullmove = 1;
+    size_t replay = 18;
 };
 
 bool startsWith(const std::string& line, const std::string& prefix) {
@@ -177,6 +189,85 @@ std::string sideToMoveName(const std::string& position) {
     return sideToMoveSign(position) == +1 ? "White" : "Black";
 }
 
+bool applyUciMove(enyo::Board& board, const std::string& move) {
+    auto resolved = enyo::uci_to_move(board, move);
+    if (!resolved)
+        return false;
+
+    if (board.side == enyo::white)
+        apply_move<enyo::white>(board, *resolved);
+    else
+        apply_move<enyo::black>(board, *resolved);
+    return true;
+}
+
+std::optional<enyo::Board> boardFromPosition(const std::string& position) {
+    std::string fen;
+    std::string moves;
+    if (startsWith(position, "position startpos")) {
+        fen = "startpos";
+        size_t moves_pos = position.find(" moves ");
+        if (moves_pos != std::string::npos)
+            moves = position.substr(moves_pos + 7);
+    } else if (startsWith(position, "position fen ")) {
+        std::string text = position.substr(13);
+        size_t moves_pos = text.find(" moves ");
+        fen = moves_pos == std::string::npos ? text : text.substr(0, moves_pos);
+        if (moves_pos != std::string::npos)
+            moves = text.substr(moves_pos + 7);
+    } else {
+        return std::nullopt;
+    }
+
+    try {
+        enyo::Board board{fen};
+        std::istringstream move_stream(moves);
+        std::string move;
+        while (move_stream >> move) {
+            if (!applyUciMove(board, move))
+                return std::nullopt;
+        }
+        return board;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::string algebraForMove(const std::string& position, const std::string& move) {
+    if (move.empty() || move == "(none)")
+        return "";
+
+    auto board = boardFromPosition(position);
+    if (!board)
+        return "";
+
+    try {
+        return enyo::uci_to_algebra(*board, move);
+    } catch (...) {
+        return "";
+    }
+}
+
+std::string formatMoveWithAlgebra(const std::string& position, const std::string& move) {
+    std::string algebra = algebraForMove(position, move);
+    if (algebra.empty())
+        return move;
+    if (move.size() == 5 && algebra.rfind(move.substr(2, 2) + "=", 0) == 0)
+        return move;
+    return fmt::format("{} ({})", move, algebra);
+}
+
+ReplayLineWidths replayLineWidths(const std::vector<LogEntry>& entries, int display_total) {
+    ReplayLineWidths widths;
+    widths.fullmove = std::to_string(std::max(1, display_total)).size();
+    for (const auto& entry : entries) {
+        std::string expected = formatMoveWithAlgebra(entry.position, entry.expected);
+        widths.replay = std::max(widths.replay, expected.size());
+        widths.replay = std::max(widths.replay, fmt::format("{} != {}", expected, expected).size());
+    }
+    return widths;
+}
+
 std::string appendMoveToPosition(const std::string& position, const std::string& move) {
     if (move.empty() || move == "(none)")
         return position;
@@ -209,6 +300,17 @@ int scoreAsCp(Score score) {
         return sign * (100000 - std::min(std::abs(score.value), 1000));
     }
     return 0;
+}
+
+std::string formatScore(Score score) {
+    if (score.kind == ScoreKind::Cp)
+        return score.value == 0 ? "0cp" : fmt::format("{:+}cp", score.value);
+    if (score.kind == ScoreKind::Mate) {
+        if (score.value >= 0)
+            return fmt::format("M{}", score.value);
+        return fmt::format("-M{}", std::abs(score.value));
+    }
+    return "n/a";
 }
 
 int lichessCappedCp(int cp) {
@@ -307,18 +409,38 @@ std::string formatAnalysisEntry(const AnalysisEntry& entry, const AnalysisWidths
 }
 
 std::string formatReferenceInline(const MoveValidation& validation, bool color) {
+    constexpr size_t judgement_width = 17;
+
     if (!validation.ok)
-        return " | n/a";
+        return fmt::format("n/a{:<{}}", "", judgement_width - 3);
+
+    std::string best_suffix = validation.best_score.empty() ? "" : " " + validation.best_score;
+    if (!validation.bestmove.empty() && validation.bestmove != "(none)") {
+        best_suffix = fmt::format(" {}{}",
+                                  validation.best_display.empty() ? validation.bestmove : validation.best_display,
+                                  best_suffix);
+    }
+    std::string best_report = validation.reference_best && !best_suffix.empty()
+        ? best_suffix.substr(1)
+        : "best" + best_suffix;
 
     if (isReportableJudgement(validation.label)) {
         std::string judgement = fmt::format("{} {}cp", validation.label, validation.cp_loss);
-        return " | " + colorizeJudgement(judgement, validation.label, color);
+        return fmt::format("{} | {}",
+                           colorizeJudgement(fmt::format("{:<{}}", judgement, judgement_width),
+                                             validation.label, color),
+                           best_report);
     }
 
-    if (validation.cp_loss > 0)
-        return fmt::format(" | loss {}cp | best: {}", validation.cp_loss, validation.bestmove);
+    std::string judgement = validation.reference_best
+        ? "best"
+        : fmt::format("loss {}cp", validation.cp_loss);
+    std::string label = validation.reference_best ? "best" : "";
 
-    return " | " + colorizeJudgement("best", "best", color);
+    return fmt::format("{} | {}",
+                       colorizeJudgement(fmt::format("{:<{}}", judgement, judgement_width),
+                                         label, color),
+                       best_report);
 }
 
 std::string colorizeAnalysisReport(const std::string& report, bool color) {
@@ -719,7 +841,13 @@ MoveValidation validateMove(EngineProcess& reference,
     }
 
     validation.bestmove = best.bestmove;
-    if (best.bestmove == played_move) {
+    int mover_sign = sideToMoveSign(position);
+    Score best_score = scoreForSide(best.score_white, mover_sign);
+    validation.best_display = formatMoveWithAlgebra(position, best.bestmove);
+    validation.best_score = formatScore(best_score);
+
+    validation.reference_best = best.bestmove == played_move;
+    if (validation.reference_best) {
         validation.ok = true;
         return validation;
     }
@@ -730,8 +858,6 @@ MoveValidation validateMove(EngineProcess& reference,
         return validation;
     }
 
-    int mover_sign = sideToMoveSign(position);
-    Score best_score = scoreForSide(best.score_white, mover_sign);
     Score played_score = scoreForSide(played.score_white, mover_sign);
     int best_cp = scoreAsCp(best_score);
     int played_cp = scoreAsCp(played_score);
@@ -1117,6 +1243,7 @@ int main(int argc, char* argv[]) {
                 fmt::print("[{}/{}] {}\n", entry.fullmove, display_total, entry.expected);
             return 0;
         }
+        ReplayLineWidths line_widths = replayLineWidths(entries, display_total);
 
         if (!executableExists(engine_path)) {
             fmt::print(stderr, "ERROR: Engine '{}' not found or not executable\n", engine_path);
@@ -1166,6 +1293,8 @@ int main(int argc, char* argv[]) {
             SearchResult result = waitForBestmove(*engine, entry, display_total, progress);
             searched++;
             bool mismatch = result.bestmove != entry.expected;
+            std::string played_display = formatMoveWithAlgebra(entry.position, result.bestmove);
+            std::string expected_display = formatMoveWithAlgebra(entry.position, entry.expected);
             if (mismatch)
                 mismatches++;
             min_wdl = std::min(min_wdl, result.wdl);
@@ -1199,14 +1328,13 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            if (mismatch) {
-                fmt::print("[{}/{}] bestmove {} | expected: {} | WDL {:+.2f}{}\n",
-                           entry.fullmove, display_total, result.bestmove, entry.expected, result.wdl,
-                           reference_suffix);
-            } else {
-                fmt::print("[{}/{}] bestmove {} | WDL {:+.2f}{}\n",
-                           entry.fullmove, display_total, result.bestmove, result.wdl, reference_suffix);
-            }
+            std::string replay_display = mismatch
+                ? fmt::format("{} != {}", played_display, expected_display)
+                : played_display;
+            fmt::print("[{:>{}}/{}] {:<{}} | WDL {:+.2f} || {}\n",
+                       entry.fullmove, line_widths.fullmove, display_total,
+                       replay_display, line_widths.replay,
+                       result.wdl, reference_suffix);
             fflush(stdout);
 
             if (mismatch)

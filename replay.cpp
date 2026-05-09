@@ -755,8 +755,10 @@ std::string probeEngineTag(const std::string& engine_path) {
     return sanitizeTag(std::filesystem::path(engine_path).filename().string());
 }
 
-std::string analysisModeName(bool time_mode, int analysis_depth) {
-    std::string mode = time_mode ? "time" : "replayed";
+std::string analysisModeName(bool time_mode, int analysis_depth, const std::string& analysis_target) {
+    std::string mode = analysis_target == "logged"
+        ? "logged"
+        : (time_mode ? "time" : "replayed");
     if (analysis_depth == 20)
         return mode;
     if (analysis_depth == 0)
@@ -1149,6 +1151,7 @@ int main(int argc, char* argv[]) {
     int count = -1;
     int threads = -1;
     int analysis_depth = 20;
+    std::string analysis_target = "replayed";
     bool time_mode = false;
     bool analyze = true;
     bool print_only = false;
@@ -1171,6 +1174,7 @@ int main(int argc, char* argv[]) {
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
             "  --analysis-depth N  Reference analysis depth (default: 20; 0 follows logged depth)\n"
+            "  --analysis-target T Analyze replayed or logged moves (default: replayed)\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
@@ -1196,6 +1200,12 @@ int main(int argc, char* argv[]) {
             reference_path = argv[++i];
         } else if (arg == "--analysis-depth" && i + 1 < argc) {
             analysis_depth = std::max(0, std::stoi(argv[++i]));
+        } else if (arg == "--analysis-target" && i + 1 < argc) {
+            analysis_target = argv[++i];
+            if (analysis_target != "replayed" && analysis_target != "logged") {
+                fmt::print(stderr, "ERROR: --analysis-target must be replayed or logged\n");
+                return 1;
+            }
         } else if (arg == "--no-analysis") {
             analyze = false;
         } else if (arg == "--move" && i + 1 < argc) {
@@ -1258,7 +1268,7 @@ int main(int argc, char* argv[]) {
             fmt::print(stderr, "Error: {}\n", e.what());
             return 1;
         }
-        analysis_mode = analysisModeName(time_mode, analysis_depth);
+        analysis_mode = analysisModeName(time_mode, analysis_depth, analysis_target);
     }
 
     if (std::filesystem::is_directory(logfile))
@@ -1382,9 +1392,12 @@ int main(int argc, char* argv[]) {
             std::string reference_suffix;
             if (analyze) {
                 int depth = analysis_depth > 0 ? analysis_depth : entry.depth;
+                std::string analyzed_move = analysis_target == "logged"
+                    ? entry.expected
+                    : result.bestmove;
                 MoveValidation validation = validateMove(*reference,
                                                          entry.position,
-                                                         result.bestmove,
+                                                         analyzed_move,
                                                          depth,
                                                          entry.fullmove,
                                                          display_total,
@@ -1398,8 +1411,8 @@ int main(int argc, char* argv[]) {
                 } else if (isReportableJudgement(validation.label)) {
                     report.push_back({
                         validation.label,
-                        result.bestmove,
-                        mismatch ? entry.expected : "",
+                        analyzed_move,
+                        analysis_target == "replayed" && mismatch ? entry.expected : "",
                         validation.bestmove,
                         entry.fen,
                         entry.fullmove,

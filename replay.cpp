@@ -12,6 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1084,6 +1085,159 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
     return parsed;
 }
 
+bool isPgnResultToken(std::string_view token) {
+    return token == "1-0"
+        || token == "0-1"
+        || token == "1/2-1/2"
+        || token == "1-1"
+        || token == "*";
+}
+
+std::string stripPgnMoveNumber(std::string token) {
+    size_t pos = 0;
+    while (pos < token.size() && std::isdigit((unsigned char)token[pos]))
+        pos++;
+
+    if (pos == 0 || pos == token.size() || token[pos] != '.')
+        return token;
+
+    while (pos < token.size() && token[pos] == '.')
+        pos++;
+
+    return token.substr(pos);
+}
+
+bool isPgnMoveNumberOnly(std::string_view token) {
+    bool saw_dot = false;
+    for (char ch : token) {
+        if (ch == '.') {
+            saw_dot = true;
+            continue;
+        }
+        if (!std::isdigit((unsigned char)ch))
+            return false;
+    }
+    return saw_dot;
+}
+
+std::optional<int> pgnMainlinePlyCount(const std::filesystem::path& pgn_path) {
+    if (!std::filesystem::exists(pgn_path))
+        return std::nullopt;
+
+    std::string text = readFile(pgn_path);
+    int ply_count = 0;
+    int variation_depth = 0;
+    bool in_brace = false;
+    bool in_tag = false;
+    bool in_semicolon = false;
+    bool line_start = true;
+    std::string token;
+
+    auto flush_token = [&] {
+        if (token.empty())
+            return;
+
+        std::string move = stripPgnMoveNumber(token);
+        while (!move.empty() && (move.back() == '!' || move.back() == '?'))
+            move.pop_back();
+
+        if (!move.empty()
+         && move.front() != '$'
+         && !isPgnResultToken(move)
+         && !isPgnMoveNumberOnly(move))
+            ply_count++;
+
+        token.clear();
+    };
+
+    for (char ch : text) {
+        if (in_semicolon) {
+            if (ch == '\n') {
+                in_semicolon = false;
+                line_start = true;
+            }
+            continue;
+        }
+
+        if (in_tag) {
+            if (ch == ']')
+                in_tag = false;
+            if (ch == '\n')
+                line_start = true;
+            continue;
+        }
+
+        if (in_brace) {
+            if (ch == '}')
+                in_brace = false;
+            continue;
+        }
+
+        if (std::isspace((unsigned char)ch)) {
+            flush_token();
+            if (ch == '\n')
+                line_start = true;
+            continue;
+        }
+
+        if (line_start && ch == '[') {
+            flush_token();
+            in_tag = true;
+            continue;
+        }
+
+        line_start = false;
+
+        if (ch == ';') {
+            flush_token();
+            in_semicolon = true;
+            continue;
+        }
+
+        if (ch == '{') {
+            flush_token();
+            in_brace = true;
+            continue;
+        }
+
+        if (ch == '(') {
+            flush_token();
+            variation_depth++;
+            continue;
+        }
+
+        if (ch == ')') {
+            flush_token();
+            if (variation_depth > 0)
+                variation_depth--;
+            continue;
+        }
+
+        if (variation_depth > 0)
+            continue;
+
+        token.push_back(ch);
+    }
+
+    flush_token();
+    return ply_count;
+}
+
+void trimPostGameEntriesFromSiblingPgn(std::vector<LogEntry>& entries,
+                                       const std::filesystem::path& logfile) {
+    auto pgn_path = logfile;
+    pgn_path.replace_extension(".pgn");
+
+    auto ply_count = pgnMainlinePlyCount(pgn_path);
+    if (!ply_count || *ply_count <= 0)
+        return;
+
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+        [&](const LogEntry& entry) {
+            return moveCountFromPosition(entry.position) >= *ply_count;
+        }), entries.end());
+}
+
 int runDirectory(const std::filesystem::path& directory,
                  int argc,
                  char* argv[],
@@ -1297,6 +1451,7 @@ int main(int argc, char* argv[]) {
 
         ParsedLog parsed = readLog(logfile);
         std::vector<LogEntry> entries = parsed.entries;
+        trimPostGameEntriesFromSiblingPgn(entries, logfile_path);
         if (entries.empty()) {
             fmt::print(stderr, "ERROR: No UCI go/bestmove pairs found in '{}'\n", logfile);
             return 1;

@@ -35,6 +35,9 @@ reuses it and skips the log. Limited/debug runs such as `--move` and `--count`
 are not cached. Non-default analysis depths include the depth in the analysis
 name, such as `game.<engine-tag>_replayed_depth16_analysis`.
 
+If `game.pgn` exists next to `game.log`, replay uses the PGN mainline length
+to ignore post-game searches left in the log after the actual final move.
+
 Replay one log with an explicit engine:
 
 ```sh

@@ -74,8 +74,11 @@ struct MoveValidation {
 struct AnalysisEntry {
     std::string label;
     std::string played;
+    std::string expected;
     std::string best;
     std::string fen;
+    int fullmove = 1;
+    int display_total = 1;
     int cp_loss = 0;
 };
 
@@ -412,10 +415,20 @@ std::string colorizeJudgement(const std::string& text, const std::string& label,
     return ansi + text + "\033[0m";
 }
 
+std::string analysisPlayedText(const AnalysisEntry& entry) {
+    size_t fullmove_width = std::to_string(std::max(1, entry.display_total)).size();
+    std::string played = fmt::format("[{:>{}}/{}] {}",
+                                     entry.fullmove, fullmove_width,
+                                     entry.display_total, entry.played);
+    if (!entry.expected.empty())
+        played += fmt::format(" != log {}", entry.expected);
+    return played;
+}
+
 AnalysisWidths analysisWidths(const std::vector<AnalysisEntry>& entries) {
     AnalysisWidths widths;
     for (const auto& entry : entries) {
-        widths.played = std::max(widths.played, entry.played.size());
+        widths.played = std::max(widths.played, analysisPlayedText(entry).size());
         widths.best = std::max(widths.best, entry.best.size());
         widths.loss = std::max(widths.loss, fmt::format("{}cp", entry.cp_loss).size());
     }
@@ -424,7 +437,7 @@ AnalysisWidths analysisWidths(const std::vector<AnalysisEntry>& entries) {
 
 std::string formatAnalysisEntry(const AnalysisEntry& entry, const AnalysisWidths& widths, bool color) {
     std::string line = fmt::format("{:<11} {:<{}}  best: {:<{}}  loss: {:>{}}  FEN: {}",
-                                   entry.label + ":", entry.played, widths.played,
+                                   entry.label + ":", analysisPlayedText(entry), widths.played,
                                    entry.best, widths.best,
                                    fmt::format("{}cp", entry.cp_loss), widths.loss,
                                    entry.fen);
@@ -1386,8 +1399,11 @@ int main(int argc, char* argv[]) {
                     report.push_back({
                         validation.label,
                         result.bestmove,
+                        mismatch ? entry.expected : "",
                         validation.bestmove,
                         entry.fen,
+                        entry.fullmove,
+                        display_total,
                         validation.cp_loss
                     });
                 }

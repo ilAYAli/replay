@@ -1315,7 +1315,6 @@ int main(int argc, char* argv[]) {
         };
 
         std::unique_ptr<EngineProcess> engine = make_engine();
-        bool isolate_remaining_positions = false;
 
         int searched = 0;
         int mismatches = 0;
@@ -1381,8 +1380,6 @@ int main(int argc, char* argv[]) {
             fflush(stdout);
 
             if (mismatch)
-                isolate_remaining_positions = true;
-            if (isolate_remaining_positions)
                 engine.reset();
         }
 

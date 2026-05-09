@@ -128,6 +128,28 @@ int extractDepth(const std::string& line) {
     return parseIntField(line, "depth");
 }
 
+std::string formatMillis(int milliseconds) {
+    if (milliseconds < 0)
+        return "?";
+    if (milliseconds >= 1000)
+        return fmt::format("{:.1f}s", milliseconds / 1000.0);
+    return fmt::format("{}ms", milliseconds);
+}
+
+std::string formatSearchProgress(const std::string& go_command, int current_depth) {
+    int target_depth = parseIntField(go_command, "depth");
+    if (target_depth > 0)
+        return fmt::format("depth {}/{}", current_depth, target_depth);
+
+    int wtime = parseIntField(go_command, "wtime");
+    int btime = parseIntField(go_command, "btime");
+    if (wtime >= 0 || btime >= 0)
+        return fmt::format("depth {} | time w {} b {}",
+                           current_depth, formatMillis(wtime), formatMillis(btime));
+
+    return fmt::format("depth {}", current_depth);
+}
+
 int moveCountFromPosition(const std::string& position) {
     size_t moves_pos = position.find(" moves ");
     if (moves_pos == std::string::npos)
@@ -264,7 +286,7 @@ ReplayLineWidths replayLineWidths(const std::vector<LogEntry>& entries, int disp
     for (const auto& entry : entries) {
         std::string expected = formatMoveWithAlgebra(entry.position, entry.expected);
         widths.replay = std::max(widths.replay, expected.size());
-        widths.replay = std::max(widths.replay, fmt::format("{} != {}", expected, expected).size());
+        widths.replay = std::max(widths.replay, fmt::format("{} != log {}", expected, expected).size());
     }
     return widths;
 }
@@ -410,10 +432,10 @@ std::string formatAnalysisEntry(const AnalysisEntry& entry, const AnalysisWidths
 }
 
 std::string formatReferenceInline(const MoveValidation& validation, bool color) {
-    constexpr size_t judgement_width = 17;
+    constexpr size_t judgement_width = 9;
 
     if (!validation.ok)
-        return fmt::format("n/a{:<{}}", "", judgement_width - 3);
+        return fmt::format("{:<{}}", "n/a", judgement_width);
 
     std::string best_suffix = validation.best_score.empty() ? "" : " " + validation.best_score;
     if (!validation.bestmove.empty() && validation.bestmove != "(none)") {
@@ -422,25 +444,24 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
                                   best_suffix);
     }
     std::string best_report = validation.reference_best && !best_suffix.empty()
-        ? best_suffix.substr(1)
-        : "best" + best_suffix;
+        ? ""
+        : " | best" + best_suffix;
 
     if (isReportableJudgement(validation.label)) {
         std::string judgement = fmt::format("{} {}cp", validation.label, validation.cp_loss);
-        return fmt::format("{} | {}",
+        return fmt::format("ref {}{}",
                            colorizeJudgement(fmt::format("{:<{}}", judgement, judgement_width),
                                              validation.label, color),
                            best_report);
     }
 
     std::string judgement = validation.reference_best
-        ? "best"
+        ? fmt::format("best {}", validation.best_score)
         : fmt::format("loss {}cp", validation.cp_loss);
     std::string label = validation.reference_best ? "best" : "";
 
-    return fmt::format("{} | {}",
-                       colorizeJudgement(fmt::format("{:<{}}", judgement, judgement_width),
-                                         label, color),
+    return fmt::format("ref {}{}",
+                       colorizeJudgement(fmt::format("{:<{}}", judgement, judgement_width), label, color),
                        best_report);
 }
 
@@ -913,6 +934,7 @@ MoveValidation validateMove(EngineProcess& reference,
 
 SearchResult waitForBestmove(EngineProcess& engine,
                              const LogEntry& entry,
+                             const std::string& go_command,
                              int display_total,
                              bool progress) {
     int score = 0;
@@ -946,9 +968,9 @@ SearchResult waitForBestmove(EngineProcess& engine,
             }
 
             if (progress) {
-                fmt::print("\r\033[K{} thinking [{}/{}] depth {:2} | WDL {:+.2f} | expecting {}",
+                fmt::print("\r\033[K{} thinking [{}/{}] {} | WDL {:+.2f} | expecting {}",
                            sideToMoveName(entry.position), entry.fullmove, display_total,
-                           depth, wdl, entry.expected);
+                           formatSearchProgress(go_command, depth), wdl, entry.expected);
                 fflush(stdout);
             }
         }
@@ -1329,10 +1351,11 @@ int main(int argc, char* argv[]) {
             if (!engine)
                 engine = make_engine();
 
+            std::string go_command = time_mode ? entry.logged_go : entry.replay_go;
             engine->send(entry.position);
-            engine->send(time_mode ? entry.logged_go : entry.replay_go);
+            engine->send(go_command);
 
-            SearchResult result = waitForBestmove(*engine, entry, display_total, progress);
+            SearchResult result = waitForBestmove(*engine, entry, go_command, display_total, progress);
             searched++;
             bool mismatch = result.bestmove != entry.expected;
             std::string played_display = formatMoveWithAlgebra(entry.position, result.bestmove);
@@ -1371,9 +1394,9 @@ int main(int argc, char* argv[]) {
             }
 
             std::string replay_display = mismatch
-                ? fmt::format("{} != {}", played_display, expected_display)
+                ? fmt::format("{} != log {}", played_display, expected_display)
                 : played_display;
-            fmt::print("[{:>{}}/{}] {:<{}} | WDL {:+.2f} || {}\n",
+            fmt::print("[{:>{}}/{}] {:<{}} | WDL {:+.2f} :: {}\n",
                        entry.fullmove, line_widths.fullmove, display_total,
                        replay_display, line_widths.replay,
                        result.wdl, reference_suffix);

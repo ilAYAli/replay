@@ -1675,7 +1675,7 @@ int main(int argc, char* argv[]) {
                 fmt::print("Analysis reused: {}\n", report_path.string());
                 if (verbose && !cached_provenance.empty())
                     fmt::print("{}\n", cached_provenance);
-                fmt::print("\n=== Analysis ===\n{}",
+                fmt::print("=== Analysis ===\n{}",
                            colorizeAnalysisReport(cached_body, color_output));
                 if (cached_body.empty() || cached_body.back() != '\n')
                     fmt::print("\n");

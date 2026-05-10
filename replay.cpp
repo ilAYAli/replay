@@ -1535,7 +1535,7 @@ int main(int argc, char* argv[]) {
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
             "  --analysis-depth N  Reference analysis depth (default: 20; 0 follows logged depth)\n"
-            "  --analysis-target T Analyze replay or log moves: replay, log (default: replay)\n"
+            "  --analyse T         Analyze replay or log moves: replay, log (default: replay)\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
@@ -1560,10 +1560,10 @@ int main(int argc, char* argv[]) {
             reference_path = argv[++i];
         } else if (arg == "--analysis-depth" && i + 1 < argc) {
             analysis_depth = std::max(0, std::stoi(argv[++i]));
-        } else if (arg == "--analysis-target" && i + 1 < argc) {
+        } else if (arg == "--analyse" && i + 1 < argc) {
             analysis_target = argv[++i];
             if (analysis_target != "replay" && analysis_target != "log") {
-                fmt::print(stderr, "ERROR: --analysis-target must be replay or log\n");
+                fmt::print(stderr, "ERROR: --analyse must be replay or log\n");
                 return 1;
             }
         } else if (arg == "--no-analysis") {
@@ -1620,7 +1620,7 @@ int main(int argc, char* argv[]) {
     if (warn_log_time) {
         fmt::print(stderr,
                    "WARNING: --time affects candidate replay only; "
-                   "--analysis-target log analyzes fixed log moves.\n");
+                   "--analyse log analyzes fixed log moves.\n");
         if (logfile_is_directory)
             setenv(kSuppressLogTimeWarning, "1", 1);
     }

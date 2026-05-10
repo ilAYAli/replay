@@ -4,7 +4,7 @@ Replay UCI log searches and compare the current engine output with the
 `bestmove` values recorded in the log.
 
 `replay` is for reproducing logged engine behavior. It can also report whether
-the candidate engine's replayed or logged moves are inaccuracies, mistakes, or
+the candidate engine's replay or log moves are inaccuracies, mistakes, or
 blunders according to a reference engine.
 
 ## Build
@@ -58,15 +58,15 @@ Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 
 The end report is saved beside the log as `game.<analysis-key>_<target>_analysis`,
-for example `game.91c8a4d2_replayed_analysis` or
-`game.91c8a4d2_logged_analysis`.
+for example `game.91c8a4d2_rpl_analysis` or
+`game.91c8a4d2_log_analysis`.
 The key hashes the log, sibling PGN when present, replay/analysis mode,
 candidate/reference binary content and UCI output, exact setoption stream sent
 by replay, and content hashes for NNUE/file-valued options that exist locally.
 If that file already exists, replay reuses it and skips the log.
 Limited/debug runs such as `--move` and `--count` are not cached.
 Replay prints the cache provenance in one line, for example:
-`analysis-key 91c8a4d2 | candidate cfg 7d2a4b10 | reference cfg 41f0aa29 | log b13c9a02 | target logged | ref-depth 20 | nnue2 d43206fe`.
+`analysis-key 91c8a4d2 | candidate cfg 7d2a4b10 | reference cfg 41f0aa29 | log b13c9a02 | target log | ref-depth 20 | nnue2 d43206fe`.
 
 Replay one log with an explicit engine:
 

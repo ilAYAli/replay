@@ -944,14 +944,18 @@ EngineConfig probeEngineConfig(const std::string& engine_path,
 }
 
 std::string analysisModeName(bool time_mode, int analysis_depth, const std::string& analysis_target) {
-    std::string mode = analysis_target == "logged"
-        ? "logged"
-        : (time_mode ? "time" : "replayed");
+    std::string mode = analysis_target == "log"
+        ? "log"
+        : (time_mode ? "time" : "replay");
     if (analysis_depth == 20)
         return mode;
     if (analysis_depth == 0)
-        return mode + "_logged-depth";
+        return mode + "_log-depth";
     return fmt::format("{}_depth{}", mode, analysis_depth);
+}
+
+std::string analysisTargetSuffix(const std::string& analysis_target) {
+    return analysis_target == "log" ? "log" : "rpl";
 }
 
 std::filesystem::path analysisPath(const std::filesystem::path& logfile,
@@ -960,7 +964,7 @@ std::filesystem::path analysisPath(const std::filesystem::path& logfile,
     return logfile.parent_path() / fmt::format("{}.{}_{}_analysis",
                                                logfile.stem().string(),
                                                analysis_key,
-                                               analysis_target);
+                                               analysisTargetSuffix(analysis_target));
 }
 
 std::string readFile(const std::filesystem::path& path) {
@@ -1507,7 +1511,7 @@ int main(int argc, char* argv[]) {
     int count = -1;
     int threads = -1;
     int analysis_depth = 20;
-    std::string analysis_target = "replayed";
+    std::string analysis_target = "replay";
     bool time_mode = false;
     bool analyze = true;
     bool verbose = false;
@@ -1521,7 +1525,7 @@ int main(int argc, char* argv[]) {
             "Usage: {} [options] [engine] <logfile-or-directory>\n"
             "\n"
             "Replay UCI log searches and compare engine bestmoves with the log.\n"
-            "At the end, analyze replayed candidate moves with a reference engine.\n"
+            "At the end, analyze replay or log moves with a reference engine.\n"
             "Full reports are saved as <log>.<analysis-key>_<target>_analysis and reused.\n"
             "\n"
             "Options:\n"
@@ -1529,7 +1533,7 @@ int main(int argc, char* argv[]) {
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
             "  --analysis-depth N  Reference analysis depth (default: 20; 0 follows logged depth)\n"
-            "  --analysis-target T Analyze replayed or logged moves (default: replayed)\n"
+            "  --analysis-target T Analyze replay or log moves: replay, log (default: replay)\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
@@ -1556,8 +1560,8 @@ int main(int argc, char* argv[]) {
             analysis_depth = std::max(0, std::stoi(argv[++i]));
         } else if (arg == "--analysis-target" && i + 1 < argc) {
             analysis_target = argv[++i];
-            if (analysis_target != "replayed" && analysis_target != "logged") {
-                fmt::print(stderr, "ERROR: --analysis-target must be replayed or logged\n");
+            if (analysis_target != "replay" && analysis_target != "log") {
+                fmt::print(stderr, "ERROR: --analysis-target must be replay or log\n");
                 return 1;
             }
         } else if (arg == "--no-analysis") {
@@ -1751,7 +1755,7 @@ int main(int argc, char* argv[]) {
             std::string reference_suffix;
             if (analyze) {
                 int depth = analysis_depth > 0 ? analysis_depth : entry.depth;
-                std::string analyzed_move = analysis_target == "logged"
+                std::string analyzed_move = analysis_target == "log"
                     ? entry.expected
                     : result.bestmove;
                 MoveValidation validation = validateMove(*reference,
@@ -1771,7 +1775,7 @@ int main(int argc, char* argv[]) {
                     report.push_back({
                         validation.label,
                         analyzed_move,
-                        analysis_target == "replayed" && mismatch ? entry.expected : "",
+                        analysis_target == "replay" && mismatch ? entry.expected : "",
                         validation.bestmove,
                         entry.fen,
                         entry.fullmove,

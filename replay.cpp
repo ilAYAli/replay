@@ -1534,7 +1534,7 @@ int main(int argc, char* argv[]) {
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
-            "  --analysis-depth N  Reference analysis depth (default: 20; 0 follows logged depth)\n"
+            "  --ref-depth N       Reference analysis depth (default: 20; 0 follows logged depth)\n"
             "  --analyse T         Analyze replay or log moves: replay, log (default: replay)\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
             "  --move N            Start at fullmove N\n"
@@ -1558,7 +1558,7 @@ int main(int argc, char* argv[]) {
             engine_path_explicit = true;
         } else if (arg == "--reference" && i + 1 < argc) {
             reference_path = argv[++i];
-        } else if (arg == "--analysis-depth" && i + 1 < argc) {
+        } else if (arg == "--ref-depth" && i + 1 < argc) {
             analysis_depth = std::max(0, std::stoi(argv[++i]));
         } else if (arg == "--analyse" && i + 1 < argc) {
             analysis_target = argv[++i];

@@ -99,13 +99,13 @@ Use a specific reference engine and analysis depth. The default reference
 analysis depth is 20:
 
 ```sh
-replay --engine ./build/enyo --reference stockfish --analysis-depth 16 "game.log"
+replay --engine ./build/enyo --reference stockfish --ref-depth 16 "game.log"
 ```
 
 Follow the logged engine depth for reference analysis:
 
 ```sh
-replay --analysis-depth 0 "game.log"
+replay --ref-depth 0 "game.log"
 ```
 
 Re-analyze even when a matching analysis file already exists:

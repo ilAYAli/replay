@@ -872,14 +872,21 @@ void waitForToken(EngineProcess& engine, const std::string& token) {
     }
 }
 
-void sendInitCommand(EngineProcess& engine, const std::string& command, bool show_init) {
-    if (show_init)
+void sendInitCommand(EngineProcess& engine,
+                     const std::string& command,
+                     bool show_init,
+                     bool print_command = true) {
+    if (show_init && print_command)
         fmt::print("> {}\n", command);
     engine.send(command);
 }
 
 bool shouldPrintInitLine(const std::string& line) {
-    return !line.empty() && !startsWith(line, "option name ");
+    return !line.empty()
+        && line != "uciok"
+        && line != "readyok"
+        && !startsWith(line, "id author ")
+        && !startsWith(line, "option name ");
 }
 
 void waitForInitToken(EngineProcess& engine, const std::string& token, bool show_init) {
@@ -1013,7 +1020,7 @@ void initializeEngine(EngineProcess& engine,
     if (show_init)
         fmt::print("\n=== Candidate UCI ===\n");
 
-    sendInitCommand(engine, "uci", show_init);
+    sendInitCommand(engine, "uci", show_init, false);
     waitForInitToken(engine, "uciok", show_init);
 
     for (const auto& option : setoptions)
@@ -1022,8 +1029,8 @@ void initializeEngine(EngineProcess& engine,
     if (threads > 0)
         sendInitCommand(engine, fmt::format("setoption name Threads value {}", threads), show_init);
 
-    sendInitCommand(engine, "ucinewgame", show_init);
-    sendInitCommand(engine, "isready", show_init);
+    sendInitCommand(engine, "ucinewgame", show_init, false);
+    sendInitCommand(engine, "isready", show_init, false);
     waitForInitToken(engine, "readyok", show_init);
 
     if (show_init)

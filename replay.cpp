@@ -442,11 +442,11 @@ std::string judgementColor(const std::string& label) {
     return "";
 }
 
-std::string colorizeJudgement(const std::string& text, const std::string& label, bool color) {
+std::string colorizeJudgementToken(const std::string& text, const std::string& label, bool color) {
     std::string ansi = judgementColor(label);
-    if (!color || ansi.empty())
+    if (!color || ansi.empty() || !startsWith(text, label))
         return text;
-    return ansi + text + "\033[0m";
+    return ansi + label + "\033[0m" + text.substr(label.size());
 }
 
 std::string analysisPlayedText(const AnalysisEntry& entry) {
@@ -472,13 +472,15 @@ AnalysisWidths analysisWidths(const std::vector<AnalysisEntry>& entries) {
 std::string formatAnalysisEntry(const AnalysisEntry& entry,
                                 const AnalysisWidths& widths,
                                 bool color) {
-    std::string line = fmt::format("{:<11} {:<{}}  best: {:<{}}  loss: {:>{}}",
-                                   entry.label + ":", analysisPlayedText(entry), widths.played,
+    std::string label = colorizeJudgementToken(fmt::format("{:<11}", entry.label + ":"),
+                                               entry.label, color);
+    std::string line = fmt::format("{} {:<{}}  best: {:<{}}  loss: {:>{}}",
+                                   label, analysisPlayedText(entry), widths.played,
                                    entry.best, widths.best,
                                    fmt::format("{}cp", entry.cp_loss), widths.loss);
     if (!entry.fen.empty())
         line += "  FEN: " + entry.fen;
-    return colorizeJudgement(line, entry.label, color);
+    return line;
 }
 
 std::string formatReferenceInline(const MoveValidation& validation, bool color) {
@@ -500,8 +502,8 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
     if (isReportableJudgement(validation.label)) {
         std::string judgement = fmt::format("{} {}cp", validation.label, validation.cp_loss);
         return fmt::format("ref {}{}",
-                           colorizeJudgement(fmt::format("{:<{}}", judgement, judgement_width),
-                                             validation.label, color),
+                           colorizeJudgementToken(fmt::format("{:<{}}", judgement, judgement_width),
+                                                  validation.label, color),
                            best_report);
     }
 
@@ -511,7 +513,7 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
     std::string label = validation.reference_best ? "best" : "";
 
     return fmt::format("ref {}{}",
-                       colorizeJudgement(fmt::format("{:<{}}", judgement, judgement_width), label, color),
+                       colorizeJudgementToken(fmt::format("{:<{}}", judgement, judgement_width), label, color),
                        best_report);
 }
 
@@ -524,11 +526,11 @@ std::string colorizeAnalysisReport(const std::string& report, bool color) {
     std::string line;
     while (std::getline(input, line)) {
         if (startsWith(line, "blunder:"))
-            output += colorizeJudgement(line, "blunder", true);
+            output += colorizeJudgementToken(line, "blunder", true);
         else if (startsWith(line, "mistake:"))
-            output += colorizeJudgement(line, "mistake", true);
+            output += colorizeJudgementToken(line, "mistake", true);
         else if (startsWith(line, "inaccuracy:"))
-            output += colorizeJudgement(line, "inaccuracy", true);
+            output += colorizeJudgementToken(line, "inaccuracy", true);
         else
             output += line;
         output += "\n";

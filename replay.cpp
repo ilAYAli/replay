@@ -1486,7 +1486,7 @@ int runDirectory(const std::filesystem::path& directory,
     int failures = 0;
     setenv(kReplayBatch, "1", 1);
     for (size_t i = 0; i < logs.size(); ++i) {
-        fmt::print("[{}/{}] {}\n", i + 1, logs.size(), logs[i].filename().string());
+        fmt::print("\n[{}/{}] {}\n", i + 1, logs.size(), logs[i].filename().string());
         std::fflush(stdout);
 
         std::string command = shellQuote(argv[0]);

@@ -29,11 +29,14 @@ commands so the engine version and applied options are visible.
 Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 
-The end report is saved beside the log as
-`game.<engine-tag>_replayed_analysis`. If that file already exists, replay
-reuses it and skips the log. Limited/debug runs such as `--move` and `--count`
-are not cached. Non-default analysis depths include the depth in the analysis
-name, such as `game.<engine-tag>_replayed_depth16_analysis`.
+The end report is saved beside the log as `game.<analysis-key>_analysis`.
+The key hashes the log, sibling PGN when present, replay/analysis mode,
+candidate/reference binary content and UCI output, exact setoption stream sent
+by replay, and content hashes for NNUE/file-valued options that exist locally.
+If that file already exists, replay reuses it and skips the log.
+Limited/debug runs such as `--move` and `--count` are not cached.
+Replay prints the cache provenance in one line, for example:
+`analysis-key 91c8a4d2 | candidate cfg 7d2a4b10 | reference cfg 41f0aa29 | log b13c9a02 | target logged depth 20 | nnue2 d43206fe`.
 
 If `game.pgn` exists next to `game.log`, replay uses the PGN mainline length
 to ignore post-game searches left in the log after the actual final move.

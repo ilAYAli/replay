@@ -16,6 +16,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 #include <fmt/format.h>
 
@@ -94,8 +95,37 @@ struct ReplayLineWidths {
     size_t replay = 18;
 };
 
+struct EngineConfig {
+    std::string hash;
+    std::string nnue2_hash;
+};
+
+struct AnalysisCache {
+    std::string key;
+    std::string provenance;
+};
+
+struct FileOptionSummary {
+    std::string details;
+    std::string nnue2_hash = "none";
+};
+
 bool startsWith(const std::string& line, const std::string& prefix) {
     return line.rfind(prefix, 0) == 0;
+}
+
+std::string trim(std::string text) {
+    while (!text.empty() && std::isspace((unsigned char)text.front()))
+        text.erase(text.begin());
+    while (!text.empty() && std::isspace((unsigned char)text.back()))
+        text.pop_back();
+    return text;
+}
+
+std::string lower(std::string text) {
+    for (char& ch : text)
+        ch = (char)std::tolower((unsigned char)ch);
+    return text;
 }
 
 std::string extractMove(const std::string& line) {
@@ -527,46 +557,6 @@ bool executableExists(const std::string& path) {
     return system(check_cmd.c_str()) == 0;
 }
 
-bool isHashChar(char ch) {
-    return std::isxdigit((unsigned char)ch) != 0;
-}
-
-std::string findHashTag(const std::string& text) {
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (!isHashChar(text[i]))
-            continue;
-
-        size_t start = i;
-        while (i < text.size() && isHashChar(text[i]))
-            ++i;
-
-        size_t length = i - start;
-        if (length < 7 || length > 40)
-            continue;
-
-        std::string tag = text.substr(start, length);
-        if (text.find("dirty") != std::string::npos)
-            tag += "-dirty";
-        return tag;
-    }
-
-    return "";
-}
-
-std::string sanitizeTag(std::string tag) {
-    for (char& ch : tag) {
-        if (!std::isalnum((unsigned char)ch) && ch != '-' && ch != '_')
-            ch = '-';
-    }
-
-    while (!tag.empty() && tag.front() == '-')
-        tag.erase(tag.begin());
-    while (!tag.empty() && tag.back() == '-')
-        tag.pop_back();
-
-    return tag.empty() ? "engine" : tag;
-}
-
 std::string shellQuote(const std::string& value) {
     std::string quoted = "'";
     for (char ch : value) {
@@ -577,6 +567,185 @@ std::string shellQuote(const std::string& value) {
     }
     quoted += "'";
     return quoted;
+}
+
+void hashAppend(uint64_t& hash, std::string_view data) {
+    constexpr uint64_t prime = 1099511628211ULL;
+    for (unsigned char ch : data) {
+        hash ^= ch;
+        hash *= prime;
+    }
+}
+
+std::string hashString(std::string_view data, size_t length = 12) {
+    uint64_t hash = 1469598103934665603ULL;
+    hashAppend(hash, data);
+    std::string hex = fmt::format("{:016x}", hash);
+    return hex.substr(0, std::min(length, hex.size()));
+}
+
+std::string hashFileContent(const std::filesystem::path& path, size_t length = 12) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open())
+        return "missing";
+
+    uint64_t hash = 1469598103934665603ULL;
+    char buffer[65536];
+    while (file) {
+        file.read(buffer, sizeof(buffer));
+        hashAppend(hash, std::string_view(buffer, (size_t)file.gcount()));
+    }
+
+    std::string hex = fmt::format("{:016x}", hash);
+    return hex.substr(0, std::min(length, hex.size()));
+}
+
+std::string joinLines(const std::vector<std::string>& lines) {
+    std::string text;
+    for (const auto& line : lines)
+        text += line + "\n";
+    return text;
+}
+
+std::filesystem::path expandPath(std::string value) {
+    value = trim(value);
+    if (value.size() >= 2
+     && ((value.front() == '"' && value.back() == '"')
+      || (value.front() == '\'' && value.back() == '\'')))
+        value = value.substr(1, value.size() - 2);
+
+    if (startsWith(value, "~/")) {
+        const char* home = std::getenv("HOME");
+        if (home)
+            value = std::string(home) + value.substr(1);
+    }
+
+    std::filesystem::path path = value;
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+        auto canonical = std::filesystem::weakly_canonical(path, ec);
+        if (!ec)
+            return canonical;
+    }
+
+    return path;
+}
+
+std::optional<std::filesystem::path> resolveExecutablePath(const std::string& engine_path) {
+    std::string resolved = engine_path;
+    if (engine_path.find('/') == std::string::npos) {
+        std::string command = "command -v " + shellQuote(engine_path);
+        FILE* pipe = popen(command.c_str(), "r");
+        if (pipe) {
+            char buffer[4096];
+            if (fgets(buffer, sizeof(buffer), pipe))
+                resolved = trim(buffer);
+            pclose(pipe);
+        }
+    }
+
+    auto path = expandPath(resolved);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec))
+        return std::nullopt;
+
+    auto canonical = std::filesystem::weakly_canonical(path, ec);
+    if (!ec)
+        return canonical;
+    return path;
+}
+
+bool isFileOptionName(const std::string& name) {
+    std::string option = lower(name);
+    return option.find("nnue") != std::string::npos
+        || option.find("file") != std::string::npos;
+}
+
+std::optional<std::pair<std::string, std::string>> parseSetoptionValue(const std::string& line) {
+    if (!startsWith(line, "setoption name "))
+        return std::nullopt;
+
+    std::string rest = line.substr(15);
+    size_t value_pos = rest.find(" value ");
+    if (value_pos == std::string::npos)
+        return std::pair{trim(rest), std::string{}};
+
+    return std::pair{trim(rest.substr(0, value_pos)), trim(rest.substr(value_pos + 7))};
+}
+
+std::optional<std::pair<std::string, std::string>> parseUciDefaultValue(const std::string& line) {
+    if (!startsWith(line, "option name "))
+        return std::nullopt;
+
+    size_t type_pos = line.find(" type ", 12);
+    if (type_pos == std::string::npos)
+        return std::nullopt;
+
+    std::string name = trim(line.substr(12, type_pos - 12));
+    size_t default_pos = line.find(" default ", type_pos + 6);
+    if (default_pos == std::string::npos)
+        return std::pair{name, std::string{}};
+
+    return std::pair{name, trim(line.substr(default_pos + 9))};
+}
+
+void addFileOptionDetail(std::string& details,
+                         std::unordered_map<std::string, std::string>& file_hashes,
+                         std::string& nnue2_hash,
+                         const std::string& name,
+                         const std::string& value) {
+    if (!isFileOptionName(name) || trim(value).empty())
+        return;
+
+    auto path = expandPath(value);
+    std::error_code ec;
+    std::string option = lower(name);
+    details += fmt::format("{}={}", name, path.string());
+    if (std::filesystem::is_regular_file(path, ec)) {
+        std::string key = path.string();
+        if (!file_hashes.contains(key))
+            file_hashes[key] = hashFileContent(path, 16);
+        details += fmt::format(" hash={}", file_hashes[key]);
+        if (option.find("nnue2") != std::string::npos)
+            nnue2_hash = file_hashes[key].substr(0, 8);
+    } else {
+        details += " hash=missing";
+        if (option.find("nnue2") != std::string::npos)
+            nnue2_hash = "missing";
+    }
+    details += "\n";
+}
+
+FileOptionSummary fileOptionDetails(const std::string& uci_text,
+                                    const std::vector<std::string>& setoptions) {
+    std::unordered_map<std::string, std::string> file_hashes;
+    FileOptionSummary summary;
+
+    std::istringstream uci_lines(uci_text);
+    std::string line;
+    while (std::getline(uci_lines, line)) {
+        auto option = parseUciDefaultValue(line);
+        if (option)
+            addFileOptionDetail(summary.details, file_hashes, summary.nnue2_hash,
+                                option->first, option->second);
+    }
+
+    for (const auto& setoption : setoptions) {
+        auto option = parseSetoptionValue(setoption);
+        if (option)
+            addFileOptionDetail(summary.details, file_hashes, summary.nnue2_hash,
+                                option->first, option->second);
+    }
+
+    return summary;
+}
+
+std::vector<std::string> effectiveSetoptions(const std::vector<std::string>& log_setoptions,
+                                             int threads) {
+    std::vector<std::string> setoptions = log_setoptions;
+    if (threads > 0)
+        setoptions.push_back(fmt::format("setoption name Threads value {}", threads));
+    return setoptions;
 }
 
 class EngineProcess {
@@ -724,11 +893,12 @@ void waitForInitToken(EngineProcess& engine, const std::string& token, bool show
     }
 }
 
-std::string probeEngineTag(const std::string& engine_path) {
+EngineConfig probeEngineConfig(const std::string& engine_path,
+                               const std::vector<std::string>& setoptions) {
     EngineProcess engine(engine_path, false);
     engine.send("uci");
 
-    std::string id_text;
+    std::string uci_text;
     while (true) {
         if (!engine.waitReadable(30000)) {
             if (engine.hasExited())
@@ -739,21 +909,24 @@ std::string probeEngineTag(const std::string& engine_path) {
         auto line = engine.readLine();
         if (!line)
             throw std::runtime_error("engine closed stdout while waiting for uciok");
-        if (startsWith(*line, "id "))
-            id_text += *line + " ";
+        uci_text += *line + "\n";
         if (*line == "uciok")
             break;
     }
 
-    std::string tag = findHashTag(id_text);
-    if (!tag.empty())
-        return sanitizeTag(tag);
+    std::string setoption_text = joinLines(setoptions);
+    auto file_options = fileOptionDetails(uci_text, setoptions);
+    auto executable_path = resolveExecutablePath(engine_path);
+    std::string executable_text = executable_path ? executable_path->string() : engine_path;
+    std::string executable_hash = executable_path ? hashFileContent(*executable_path, 16) : "missing";
+    std::string config_hash = hashString(fmt::format(
+        "path={}\nresolved={}\nbinary={}\nuci={}\nsetoptions={}\nfiles={}\n",
+        engine_path, executable_text, executable_hash, uci_text, setoption_text, file_options.details));
 
-    tag = findHashTag(std::filesystem::path(engine_path).filename().string());
-    if (!tag.empty())
-        return sanitizeTag(tag);
-
-    return sanitizeTag(std::filesystem::path(engine_path).filename().string());
+    return {
+        config_hash,
+        file_options.nnue2_hash
+    };
 }
 
 std::string analysisModeName(bool time_mode, int analysis_depth, const std::string& analysis_target) {
@@ -768,12 +941,10 @@ std::string analysisModeName(bool time_mode, int analysis_depth, const std::stri
 }
 
 std::filesystem::path analysisPath(const std::filesystem::path& logfile,
-                                   const std::string& engine_tag,
-                                   const std::string& mode) {
-    return logfile.parent_path() / fmt::format("{}.{}_{}_analysis",
+                                   const std::string& analysis_key) {
+    return logfile.parent_path() / fmt::format("{}.{}_analysis",
                                                logfile.stem().string(),
-                                               engine_tag,
-                                               mode);
+                                               analysis_key);
 }
 
 std::string readFile(const std::filesystem::path& path) {
@@ -792,6 +963,39 @@ void writeFile(const std::filesystem::path& path, const std::string& text) {
         throw std::runtime_error(fmt::format("failed to write {}", path.string()));
 
     file << text;
+}
+
+AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
+                                 const EngineConfig& candidate,
+                                 const EngineConfig& reference,
+                                 bool time_mode,
+                                 int analysis_depth,
+                                 const std::string& analysis_target) {
+    auto pgn_path = logfile;
+    pgn_path.replace_extension(".pgn");
+
+    std::string log_hash = hashFileContent(logfile);
+    std::string pgn_hash = std::filesystem::exists(pgn_path) ? hashFileContent(pgn_path) : "none";
+    std::string input_hash = hashString(fmt::format("log={}\npgn={}\n", log_hash, pgn_hash));
+    std::string mode = analysisModeName(time_mode, analysis_depth, analysis_target);
+    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\ndepth={}\n",
+                                                   mode, time_mode, analysis_target, analysis_depth));
+
+    std::string key = hashString(fmt::format(
+        "replay-cache-v2\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
+
+    std::string provenance = fmt::format(
+        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} depth {} | nnue2 {}",
+        key,
+        candidate.hash,
+        reference.hash,
+        input_hash,
+        analysis_target,
+        analysis_depth,
+        candidate.nnue2_hash);
+
+    return {key, provenance};
 }
 
 void initializeEngine(EngineProcess& engine,
@@ -1241,38 +1445,19 @@ void trimPostGameEntriesFromSiblingPgn(std::vector<LogEntry>& entries,
 int runDirectory(const std::filesystem::path& directory,
                  int argc,
                  char* argv[],
-                 int logfile_arg_index,
-                 bool cache_enabled,
-                 bool force,
-                 const std::string& engine_tag,
-                 const std::string& analysis_mode) {
+                 int logfile_arg_index) {
     std::vector<std::filesystem::path> logs;
-    int cached = 0;
     for (const auto& entry : std::filesystem::directory_iterator(directory)) {
         if (!entry.is_regular_file() || entry.path().extension() != ".log")
             continue;
-
-        if (cache_enabled && !force && std::filesystem::exists(analysisPath(entry.path(), engine_tag, analysis_mode))) {
-            cached++;
-            continue;
-        }
-
         logs.push_back(entry.path());
     }
     std::sort(logs.begin(), logs.end());
 
     if (logs.empty()) {
-        if (cached > 0) {
-            fmt::print("All matching analyses are up to date ({} cached).\n", cached);
-            return 0;
-        }
-
         fmt::print(stderr, "ERROR: No .log files found in {}\n", directory.string());
         return 1;
     }
-
-    if (cached > 0)
-        fmt::print("Skipping {} cached logs\n", cached);
 
     int failures = 0;
     for (size_t i = 0; i < logs.size(); ++i) {
@@ -1321,7 +1506,7 @@ int main(int argc, char* argv[]) {
             "\n"
             "Replay Enyo UCI log searches and compare engine bestmoves with the log.\n"
             "At the end, analyze replayed candidate moves with a reference engine.\n"
-            "Full reports are saved as <log>.<engine-tag>_<mode>_analysis and reused.\n"
+            "Full reports are saved as <log>.<analysis-key>_analysis and reused.\n"
             "\n"
             "Options:\n"
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"
@@ -1408,26 +1593,9 @@ int main(int argc, char* argv[]) {
                       && !print_only
                       && start_move == 0
                       && count < 0;
-    std::string engine_tag;
-    std::string analysis_mode;
-    if (cache_enabled) {
-        if (!executableExists(engine_path)) {
-            fmt::print(stderr, "ERROR: Engine '{}' not found or not executable\n", engine_path);
-            return 1;
-        }
-
-        try {
-            engine_tag = probeEngineTag(engine_path);
-        } catch (const std::exception& e) {
-            fmt::print(stderr, "Error: {}\n", e.what());
-            return 1;
-        }
-        analysis_mode = analysisModeName(time_mode, analysis_depth, analysis_target);
-    }
 
     if (std::filesystem::is_directory(logfile))
-        return runDirectory(logfile, argc, argv, logfile_arg_index,
-                            cache_enabled, force, engine_tag, analysis_mode);
+        return runDirectory(logfile, argc, argv, logfile_arg_index);
 
     if (std::filesystem::path(logfile).extension() == ".pgn") {
         fmt::print(stderr, "ERROR: replay needs an Enyo .log file.\n");
@@ -1437,18 +1605,6 @@ int main(int argc, char* argv[]) {
     try {
         std::filesystem::path logfile_path = logfile;
         std::filesystem::path report_path;
-        if (cache_enabled) {
-            report_path = analysisPath(logfile_path, engine_tag, analysis_mode);
-            if (!force && std::filesystem::exists(report_path)) {
-                std::string cached_report = readFile(report_path);
-                fmt::print("Analysis reused    : {}\n\n=== Analysis ===\n{}",
-                           report_path.string(), colorizeAnalysisReport(cached_report, color_output));
-                if (cached_report.empty() || cached_report.back() != '\n')
-                    fmt::print("\n");
-                return 0;
-            }
-        }
-
         ParsedLog parsed = readLog(logfile);
         std::vector<LogEntry> entries = parsed.entries;
         trimPostGameEntriesFromSiblingPgn(entries, logfile_path);
@@ -1457,9 +1613,50 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        std::optional<AnalysisCache> cache;
+        if (cache_enabled) {
+            if (!executableExists(engine_path)) {
+                fmt::print(stderr, "ERROR: Engine '{}' not found or not executable\n", engine_path);
+                return 1;
+            }
+            if (!executableExists(reference_path)) {
+                fmt::print(stderr, "ERROR: Reference engine '{}' not found or not executable\n", reference_path);
+                fmt::print(stderr, "Use --reference <path> or --no-analysis.\n");
+                return 1;
+            }
+
+            auto candidate_config = probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
+            auto reference_config = probeEngineConfig(reference_path, {});
+            cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
+                                       time_mode, analysis_depth, analysis_target);
+            report_path = analysisPath(logfile_path, cache->key);
+
+            if (!force && std::filesystem::exists(report_path)) {
+                std::string cached_report = readFile(report_path);
+                std::string cached_body = cached_report;
+                std::string cached_provenance;
+                if (startsWith(cached_report, "analysis-key ")) {
+                    size_t newline = cached_report.find('\n');
+                    cached_provenance = cached_report.substr(0, newline);
+                    cached_body = newline == std::string::npos ? "" : cached_report.substr(newline + 1);
+                }
+
+                fmt::print("Analysis reused: {}\n", report_path.string());
+                if (!cached_provenance.empty())
+                    fmt::print("{}\n", cached_provenance);
+                fmt::print("\n=== Analysis ===\n{}",
+                           colorizeAnalysisReport(cached_body, color_output));
+                if (cached_body.empty() || cached_body.back() != '\n')
+                    fmt::print("\n");
+                return 0;
+            }
+        }
+
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
         fmt::print("Extracted {} go commands and {} bestmoves\n", total_entries, total_entries);
+        if (cache)
+            fmt::print("{}\n", cache->provenance);
 
         if (start_move > 0) {
             auto first = std::lower_bound(entries.begin(), entries.end(), start_move,
@@ -1598,7 +1795,10 @@ int main(int argc, char* argv[]) {
         fmt::print("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl);
 
         if (analyze) {
-            std::string analysis_report = formatAnalysisReport(report, analysis_failures, false);
+            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures, false);
+            std::string analysis_report = cache
+                ? cache->provenance + "\n" + analysis_report_body
+                : analysis_report_body;
             fmt::print("\n=== Analysis ===\n{}",
                        formatAnalysisReport(report, analysis_failures, color_output));
             if (cache_enabled) {

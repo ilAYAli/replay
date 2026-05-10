@@ -57,7 +57,9 @@ default; use `--verbose` to print full UCI traffic.
 Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 
-The end report is saved beside the log as `game.<analysis-key>_analysis`.
+The end report is saved beside the log as `game.<analysis-key>_<target>_analysis`,
+for example `game.91c8a4d2_replayed_analysis` or
+`game.91c8a4d2_logged_analysis`.
 The key hashes the log, sibling PGN when present, replay/analysis mode,
 candidate/reference binary content and UCI output, exact setoption stream sent
 by replay, and content hashes for NNUE/file-valued options that exist locally.

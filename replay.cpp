@@ -955,10 +955,12 @@ std::string analysisModeName(bool time_mode, int analysis_depth, const std::stri
 }
 
 std::filesystem::path analysisPath(const std::filesystem::path& logfile,
-                                   const std::string& analysis_key) {
-    return logfile.parent_path() / fmt::format("{}.{}_analysis",
+                                   const std::string& analysis_key,
+                                   const std::string& analysis_target) {
+    return logfile.parent_path() / fmt::format("{}.{}_{}_analysis",
                                                logfile.stem().string(),
-                                               analysis_key);
+                                               analysis_key,
+                                               analysis_target);
 }
 
 std::string readFile(const std::filesystem::path& path) {
@@ -1520,7 +1522,7 @@ int main(int argc, char* argv[]) {
             "\n"
             "Replay UCI log searches and compare engine bestmoves with the log.\n"
             "At the end, analyze replayed candidate moves with a reference engine.\n"
-            "Full reports are saved as <log>.<analysis-key>_analysis and reused.\n"
+            "Full reports are saved as <log>.<analysis-key>_<target>_analysis and reused.\n"
             "\n"
             "Options:\n"
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"
@@ -1639,7 +1641,7 @@ int main(int argc, char* argv[]) {
             auto reference_config = probeEngineConfig(reference_path, {});
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
                                        time_mode, analysis_depth, analysis_target);
-            report_path = analysisPath(logfile_path, cache->key);
+            report_path = analysisPath(logfile_path, cache->key, analysis_target);
 
             if (!force && std::filesystem::exists(report_path)) {
                 std::string cached_report = readFile(report_path);

@@ -40,6 +40,7 @@ struct ParsedLog {
 };
 
 constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNING";
+constexpr const char* kReplayBatch = "REPLAY_BATCH";
 
 struct SearchResult {
     std::string bestmove;
@@ -1483,8 +1484,10 @@ int runDirectory(const std::filesystem::path& directory,
     }
 
     int failures = 0;
+    setenv(kReplayBatch, "1", 1);
     for (size_t i = 0; i < logs.size(); ++i) {
         fmt::print("[{}/{}] {}\n", i + 1, logs.size(), logs[i].filename().string());
+        std::fflush(stdout);
 
         std::string command = shellQuote(argv[0]);
         for (int arg = 1; arg < argc; ++arg) {
@@ -1663,6 +1666,7 @@ int main(int argc, char* argv[]) {
             report_path = analysisPath(logfile_path, cache->key, analysis_target);
 
             if (!force && std::filesystem::exists(report_path)) {
+                bool batch_mode = std::getenv(kReplayBatch) != nullptr;
                 std::string cached_report = readFile(report_path);
                 std::string cached_body = cached_report;
                 std::string cached_provenance;
@@ -1672,10 +1676,13 @@ int main(int argc, char* argv[]) {
                     cached_body = newline == std::string::npos ? "" : cached_report.substr(newline + 1);
                 }
 
-                fmt::print("Analysis reused: {}\n", report_path.string());
+                if (!batch_mode)
+                    fmt::print("Analysis reused: {}\n", report_path.string());
                 if (verbose && !cached_provenance.empty())
                     fmt::print("{}\n", cached_provenance);
-                fmt::print("=== Analysis ===\n{}",
+                if (!batch_mode)
+                    fmt::print("=== Analysis ===\n");
+                fmt::print("{}",
                            colorizeAnalysisReport(cached_body, color_output));
                 if (cached_body.empty() || cached_body.back() != '\n')
                     fmt::print("\n");

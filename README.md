@@ -92,6 +92,9 @@ Replay with the original logged time-control command instead of logged depth:
 replay --time --threads 4 --move 53 --count 1 "game.log"
 ```
 
+With `--analysis-target log`, `--time` still affects only the candidate replay;
+the report analyzes the fixed moves from the log, and replay prints a warning.
+
 Use a specific reference engine and analysis depth. The default reference
 analysis depth is 20:
 

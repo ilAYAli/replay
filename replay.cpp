@@ -39,6 +39,8 @@ struct ParsedLog {
     std::vector<LogEntry> entries;
 };
 
+constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNING";
+
 struct SearchResult {
     std::string bestmove;
     double wdl = 0.0;
@@ -1610,7 +1612,20 @@ int main(int argc, char* argv[]) {
                       && start_move == 0
                       && count < 0;
 
-    if (std::filesystem::is_directory(logfile))
+    bool logfile_is_directory = std::filesystem::is_directory(logfile);
+    bool warn_log_time = analyze
+                      && time_mode
+                      && analysis_target == "log"
+                      && std::getenv(kSuppressLogTimeWarning) == nullptr;
+    if (warn_log_time) {
+        fmt::print(stderr,
+                   "WARNING: --time affects candidate replay only; "
+                   "--analysis-target log analyzes fixed log moves.\n");
+        if (logfile_is_directory)
+            setenv(kSuppressLogTimeWarning, "1", 1);
+    }
+
+    if (logfile_is_directory)
         return runDirectory(logfile, argc, argv, logfile_arg_index);
 
     if (std::filesystem::path(logfile).extension() == ".pgn") {

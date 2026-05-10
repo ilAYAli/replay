@@ -36,9 +36,9 @@ With `--time`, replay sends the original logged `go` command instead.
 `bestmove` must be a UCI move. `setoption ...` lines, if present before the
 searches, are sent to the candidate engine before replay starts.
 
-FEN in the final report is optional. Enyo logs include
-`search_position start: fen=...`; other UCI logs usually do not. Use `--fen`
-to print FENs when replay can find them. Missing FENs are ignored.
+FEN in the final report is optional metadata. Enyo logs include
+`search_position start: fen=...`; other UCI logs usually do not. Replay prints
+FENs when it can find them and ignores missing FENs.
 
 If `game.pgn` exists next to `game.log`, replay uses the PGN mainline length
 to ignore post-game searches left in the log after the actual final move.
@@ -57,10 +57,9 @@ Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 
 The end report is saved beside the log as `game.<analysis-key>_analysis`.
-The key hashes the log, sibling PGN when present, replay/analysis mode, FEN
-reporting flag, candidate/reference binary content and UCI output, exact
-setoption stream sent by replay, and content hashes for NNUE/file-valued
-options that exist locally.
+The key hashes the log, sibling PGN when present, replay/analysis mode,
+candidate/reference binary content and UCI output, exact setoption stream sent
+by replay, and content hashes for NNUE/file-valued options that exist locally.
 If that file already exists, replay reuses it and skips the log.
 Limited/debug runs such as `--move` and `--count` are not cached.
 Replay prints the cache provenance in one line, for example:
@@ -82,12 +81,6 @@ Start at a fullmove number and replay one logged engine move:
 
 ```sh
 replay --move 53 --count 1 "game.log"
-```
-
-Print only the logged bestmoves:
-
-```sh
-replay --print "game.log"
 ```
 
 Replay with the original logged time-control command instead of logged depth:
@@ -119,12 +112,6 @@ Replay without the end analysis:
 
 ```sh
 replay --no-analysis "game.log"
-```
-
-Include FENs in final analysis report lines:
-
-```sh
-replay --fen "game.log"
 ```
 
 Disable colored console output:

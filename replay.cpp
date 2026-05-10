@@ -468,13 +468,12 @@ AnalysisWidths analysisWidths(const std::vector<AnalysisEntry>& entries) {
 
 std::string formatAnalysisEntry(const AnalysisEntry& entry,
                                 const AnalysisWidths& widths,
-                                bool show_fen,
                                 bool color) {
     std::string line = fmt::format("{:<11} {:<{}}  best: {:<{}}  loss: {:>{}}",
                                    entry.label + ":", analysisPlayedText(entry), widths.played,
                                    entry.best, widths.best,
                                    fmt::format("{}cp", entry.cp_loss), widths.loss);
-    if (show_fen && !entry.fen.empty())
+    if (!entry.fen.empty())
         line += "  FEN: " + entry.fen;
     return colorizeJudgement(line, entry.label, color);
 }
@@ -537,7 +536,6 @@ std::string colorizeAnalysisReport(const std::string& report, bool color) {
 
 std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
                                  int analysis_failures,
-                                 bool show_fen,
                                  bool color) {
     std::string output;
     if (report.empty()) {
@@ -545,7 +543,7 @@ std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
     } else {
         AnalysisWidths widths = analysisWidths(report);
         for (const auto& entry : report)
-            output += formatAnalysisEntry(entry, widths, show_fen, color) + "\n";
+            output += formatAnalysisEntry(entry, widths, color) + "\n";
     }
 
     if (analysis_failures > 0)
@@ -975,8 +973,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                  const EngineConfig& reference,
                                  bool time_mode,
                                  int analysis_depth,
-                                 const std::string& analysis_target,
-                                 bool show_fen) {
+                                 const std::string& analysis_target) {
     auto pgn_path = logfile;
     pgn_path.replace_extension(".pgn");
 
@@ -984,12 +981,12 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
     std::string pgn_hash = std::filesystem::exists(pgn_path) ? hashFileContent(pgn_path) : "none";
     std::string input_hash = hashString(fmt::format("log={}\npgn={}\n", log_hash, pgn_hash));
     std::string mode = analysisModeName(time_mode, analysis_depth, analysis_target);
-    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\ndepth={}\nfen={}\n",
+    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\ndepth={}\n",
                                                    mode, time_mode, analysis_target,
-                                                   analysis_depth, show_fen));
+                                                   analysis_depth));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v3\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v4\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
@@ -1500,10 +1497,8 @@ int main(int argc, char* argv[]) {
     std::string analysis_target = "replayed";
     bool time_mode = false;
     bool analyze = true;
-    bool print_only = false;
     bool verbose = false;
     bool color_output = true;
-    bool show_fen = false;
     bool force = false;
     bool engine_path_explicit = false;
     std::vector<std::pair<int, std::string>> positional_args;
@@ -1527,8 +1522,6 @@ int main(int argc, char* argv[]) {
             "  --count N           Replay at most N logged engine moves\n"
             "  --time              Replay with the original logged go wtime/btime command\n"
             "  --threads N         Send `setoption name Threads value N`\n"
-            "  --print             Print logged bestmoves and exit\n"
-            "  --fen               Include FEN in final analysis report lines when available\n"
             "  --force             Ignore existing analysis files and analyze again\n"
             "  --no-color          Disable colored judgement output\n"
             "  --verbose, -v       Print full UCI traffic\n"
@@ -1564,10 +1557,6 @@ int main(int argc, char* argv[]) {
             threads = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--time") {
             time_mode = true;
-        } else if (arg == "--print") {
-            print_only = true;
-        } else if (arg == "--fen") {
-            show_fen = true;
         } else if (arg == "--force") {
             force = true;
         } else if (arg == "--no-color") {
@@ -1601,7 +1590,6 @@ int main(int argc, char* argv[]) {
     }
 
     bool cache_enabled = analyze
-                      && !print_only
                       && start_move == 0
                       && count < 0;
 
@@ -1639,7 +1627,7 @@ int main(int argc, char* argv[]) {
             auto candidate_config = probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
             auto reference_config = probeEngineConfig(reference_path, {});
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
-                                       time_mode, analysis_depth, analysis_target, show_fen);
+                                       time_mode, analysis_depth, analysis_target);
             report_path = analysisPath(logfile_path, cache->key);
 
             if (!force && std::filesystem::exists(report_path)) {
@@ -1689,11 +1677,6 @@ int main(int argc, char* argv[]) {
             fmt::print("Limiting to {} moves\n", count);
         }
 
-        if (print_only) {
-            for (const auto& entry : entries)
-                fmt::print("[{}/{}] {}\n", entry.fullmove, display_total, entry.expected);
-            return 0;
-        }
         ReplayLineWidths line_widths = replayLineWidths(entries, display_total);
 
         if (!executableExists(engine_path)) {
@@ -1806,13 +1789,12 @@ int main(int argc, char* argv[]) {
         fmt::print("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl);
 
         if (analyze) {
-            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures,
-                                                                    show_fen, false);
+            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures, false);
             std::string analysis_report = cache
                 ? cache->provenance + "\n" + analysis_report_body
                 : analysis_report_body;
             fmt::print("\n=== Analysis ===\n{}",
-                       formatAnalysisReport(report, analysis_failures, show_fen, color_output));
+                       formatAnalysisReport(report, analysis_failures, color_output));
             if (cache_enabled) {
                 writeFile(report_path, analysis_report);
                 fmt::print("Analysis saved     : {}\n", report_path.string());

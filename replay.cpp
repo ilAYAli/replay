@@ -986,7 +986,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
-        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} depth {} | nnue2 {}",
+        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | ref-depth {} | nnue2 {}",
         key,
         candidate.hash,
         reference.hash,

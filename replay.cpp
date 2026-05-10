@@ -878,6 +878,10 @@ void sendInitCommand(EngineProcess& engine, const std::string& command, bool sho
     engine.send(command);
 }
 
+bool shouldPrintInitLine(const std::string& line) {
+    return !line.empty() && !startsWith(line, "option name ");
+}
+
 void waitForInitToken(EngineProcess& engine, const std::string& token, bool show_init) {
     while (true) {
         if (!engine.waitReadable(30000)) {
@@ -889,7 +893,7 @@ void waitForInitToken(EngineProcess& engine, const std::string& token, bool show
         auto line = engine.readLine();
         if (!line)
             throw std::runtime_error(fmt::format("engine closed stdout while waiting for {}", token));
-        if (show_init)
+        if (show_init && shouldPrintInitLine(*line))
             fmt::print("{}\n", *line);
         if (*line == token)
             return;

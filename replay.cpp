@@ -1543,7 +1543,7 @@ int main(int argc, char* argv[]) {
             "  --threads N         Send `setoption name Threads value N`\n"
             "  --force             Ignore existing analysis files and analyze again\n"
             "  --no-color          Disable colored judgement output\n"
-            "  --verbose, -v       Print full UCI traffic\n"
+            "  --verbose, -v       Print full UCI traffic and cache hashes\n"
             "  --help, -h          Show this help and exit\n",
             prog);
     };
@@ -1673,7 +1673,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 fmt::print("Analysis reused: {}\n", report_path.string());
-                if (!cached_provenance.empty())
+                if (verbose && !cached_provenance.empty())
                     fmt::print("{}\n", cached_provenance);
                 fmt::print("\n=== Analysis ===\n{}",
                            colorizeAnalysisReport(cached_body, color_output));
@@ -1686,7 +1686,7 @@ int main(int argc, char* argv[]) {
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
         fmt::print("Extracted {} go commands and {} bestmoves\n", total_entries, total_entries);
-        if (cache)
+        if (verbose && cache)
             fmt::print("{}\n", cache->provenance);
 
         if (start_move > 0) {

@@ -2069,6 +2069,7 @@ int main(int argc, char* argv[]) {
         std::string analysis_report_body;
         std::string game_report;
         std::string timeout_report;
+        bool printed_analysis_save = false;
         if (analyze) {
             bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
             timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
@@ -2083,10 +2084,11 @@ int main(int argc, char* argv[]) {
                 fmt::print("\n");
                 writeFile(report_path, analysis_report);
                 fmt::print("Analysis saved     : {}\n", report_path.string());
+                printed_analysis_save = true;
             }
         }
 
-        fmt::print("\n=== Summary ===\n");
+        fmt::print("{}=== Summary ===\n", printed_analysis_save ? "" : "\n");
         fmt::print("Positions replayed : {}\n", searched);
         fmt::print("Bestmove matches   : {}/{} ({} differed)\n",
                    searched - mismatches, searched, mismatches);

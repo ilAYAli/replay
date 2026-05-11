@@ -51,9 +51,8 @@ Replay one log with `enyo` from `PATH`:
 replay "game.log"
 ```
 
-At startup, replay prints the candidate engine id/name and applied `setoption`
-commands. Static UCI options, `id author`, and handshake lines are hidden by
-default; use `--verbose` to print full UCI traffic, cache hashes, and FENs.
+Candidate engine initialization is hidden by default; use `--verbose` to print
+full UCI traffic, cache hashes, and FENs.
 Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 

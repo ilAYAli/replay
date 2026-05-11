@@ -899,41 +899,6 @@ void waitForToken(EngineProcess& engine, const std::string& token) {
     }
 }
 
-void sendInitCommand(EngineProcess& engine,
-                     const std::string& command,
-                     bool show_init,
-                     bool print_command = true) {
-    if (show_init && print_command)
-        fmt::print("> {}\n", command);
-    engine.send(command);
-}
-
-bool shouldPrintInitLine(const std::string& line) {
-    return !line.empty()
-        && line != "uciok"
-        && line != "readyok"
-        && !startsWith(line, "id author ")
-        && !startsWith(line, "option name ");
-}
-
-void waitForInitToken(EngineProcess& engine, const std::string& token, bool show_init) {
-    while (true) {
-        if (!engine.waitReadable(30000)) {
-            if (engine.hasExited())
-                throw std::runtime_error(fmt::format("engine exited while waiting for {}", token));
-            throw std::runtime_error(fmt::format("timed out waiting for {}", token));
-        }
-
-        auto line = engine.readLine();
-        if (!line)
-            throw std::runtime_error(fmt::format("engine closed stdout while waiting for {}", token));
-        if (show_init && shouldPrintInitLine(*line))
-            fmt::print("{}\n", *line);
-        if (*line == token)
-            return;
-    }
-}
-
 EngineConfig probeEngineConfig(const std::string& engine_path,
                                const std::vector<std::string>& setoptions) {
     EngineProcess engine(engine_path, false);
@@ -1048,26 +1013,19 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
 
 void initializeEngine(EngineProcess& engine,
                       const std::vector<std::string>& setoptions,
-                      int threads,
-                      bool show_init) {
-    if (show_init)
-        fmt::print("\n=== Candidate UCI ===\n");
-
-    sendInitCommand(engine, "uci", show_init, false);
-    waitForInitToken(engine, "uciok", show_init);
+                      int threads) {
+    engine.send("uci");
+    waitForToken(engine, "uciok");
 
     for (const auto& option : setoptions)
-        sendInitCommand(engine, option, show_init);
+        engine.send(option);
 
     if (threads > 0)
-        sendInitCommand(engine, fmt::format("setoption name Threads value {}", threads), show_init);
+        engine.send(fmt::format("setoption name Threads value {}", threads));
 
-    sendInitCommand(engine, "ucinewgame", show_init, false);
-    sendInitCommand(engine, "isready", show_init, false);
-    waitForInitToken(engine, "readyok", show_init);
-
-    if (show_init)
-        fmt::print("\n");
+    engine.send("ucinewgame");
+    engine.send("isready");
+    waitForToken(engine, "readyok");
 }
 
 void resetReference(EngineProcess& engine) {
@@ -1835,12 +1793,9 @@ int main(int argc, char* argv[]) {
             initializeReference(*reference);
         }
 
-        bool candidate_init_shown = false;
         auto make_engine = [&] {
             auto engine = std::make_unique<EngineProcess>(engine_path, verbose);
-            bool show_init = !verbose && !candidate_init_shown;
-            initializeEngine(*engine, parsed.setoptions, threads, show_init);
-            candidate_init_shown = true;
+            initializeEngine(*engine, parsed.setoptions, threads);
             return engine;
         };
 

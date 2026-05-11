@@ -113,6 +113,11 @@ struct FileOptionSummary {
     std::string nnue2_hash = "none";
 };
 
+struct GameStatus {
+    std::string result;
+    std::string reason;
+};
+
 bool startsWith(const std::string& line, const std::string& prefix) {
     return line.rfind(prefix, 0) == 0;
 }
@@ -261,6 +266,44 @@ bool applyUciMove(enyo::Board& board, const std::string& move) {
     return true;
 }
 
+bool hasLegalMoves(enyo::Board& board) {
+    if (board.side == enyo::white)
+        return !generate_legal_moves<enyo::white, false, false>(board).empty();
+    return !generate_legal_moves<enyo::black, false, false>(board).empty();
+}
+
+bool isInCheck(const enyo::Board& board) {
+    if (board.side == enyo::white)
+        return is_check<enyo::white>(board);
+    return is_check<enyo::black>(board);
+}
+
+bool insufficientMaterial(const enyo::Board& board) {
+    if (board.pt_bb[enyo::white][enyo::pawn] || board.pt_bb[enyo::black][enyo::pawn]
+     || board.pt_bb[enyo::white][enyo::rook] || board.pt_bb[enyo::black][enyo::rook]
+     || board.pt_bb[enyo::white][enyo::queen] || board.pt_bb[enyo::black][enyo::queen])
+        return false;
+
+    int bishops = enyo::count_bits(board.pt_bb[enyo::white][enyo::bishop])
+                + enyo::count_bits(board.pt_bb[enyo::black][enyo::bishop]);
+    int knights = enyo::count_bits(board.pt_bb[enyo::white][enyo::knight])
+                + enyo::count_bits(board.pt_bb[enyo::black][enyo::knight]);
+    int minors = bishops + knights;
+    if (minors == 0)
+        return true;
+    if (minors == 1)
+        return true;
+    if (bishops == 2 && knights == 0) {
+        enyo::bitboard_t bb = board.pt_bb[enyo::white][enyo::bishop]
+                            | board.pt_bb[enyo::black][enyo::bishop];
+        int first = enyo::pop_lsb(bb);
+        int second = enyo::pop_lsb(bb);
+        return ((first / 8 + first % 8) & 1) == ((second / 8 + second % 8) & 1);
+    }
+
+    return false;
+}
+
 std::optional<enyo::Board> boardFromPosition(const std::string& position) {
     std::string fen;
     std::string moves;
@@ -291,6 +334,31 @@ std::optional<enyo::Board> boardFromPosition(const std::string& position) {
     } catch (...) {
         return std::nullopt;
     }
+}
+
+std::optional<GameStatus> terminalStatusAfterMove(const LogEntry& entry) {
+    auto board = boardFromPosition(entry.position);
+    if (!board)
+        return std::nullopt;
+    if (!applyUciMove(*board, entry.expected))
+        return std::nullopt;
+
+    if (!hasLegalMoves(*board))
+        return isInCheck(*board)
+            ? std::optional<GameStatus>{{"won", "by checkmate"}}
+            : std::optional<GameStatus>{{"drawn", "by stalemate"}};
+
+    int halfmove_clock = board->half_moves + static_cast<int>(board->gamestate.half_moves);
+    if (halfmove_clock >= 100)
+        return GameStatus{"drawn", "by 50-move rule"};
+    if (insufficientMaterial(*board))
+        return GameStatus{"drawn", "by insufficient material"};
+
+    return std::nullopt;
+}
+
+bool terminalAfterMove(const LogEntry& entry) {
+    return terminalStatusAfterMove(entry).has_value();
 }
 
 std::string algebraForMove(const std::string& position, const std::string& move) {
@@ -437,6 +505,14 @@ std::string judgementColor(const std::string& label) {
         return "\033[38;5;208m";
     if (label == "inaccuracy")
         return "\033[33m";
+    if (label == "timeout")
+        return "\033[31m";
+    if (label == "lost")
+        return "\033[31m";
+    if (label == "drawn")
+        return "\033[33m";
+    if (label == "won")
+        return "\033[32m";
     if (label == "best")
         return "\033[32m";
     return "";
@@ -447,6 +523,22 @@ std::string colorizeJudgementToken(const std::string& text, const std::string& l
     if (!color || ansi.empty() || !startsWith(text, label))
         return text;
     return ansi + label + "\033[0m" + text.substr(label.size());
+}
+
+std::string colorizeGameStatusLine(const std::string& line, bool color) {
+    if (!color || !startsWith(line, "game:"))
+        return line;
+
+    size_t status = line.find_first_not_of(' ', 5);
+    if (status == std::string::npos)
+        return line;
+    size_t end = line.find(' ', status);
+    std::string label = line.substr(status, end == std::string::npos ? end : end - status);
+    std::string ansi = judgementColor(label);
+    if (ansi.empty())
+        return line;
+
+    return line.substr(0, status) + ansi + line.substr(status) + "\033[0m";
 }
 
 std::string analysisPlayedText(const AnalysisEntry& entry) {
@@ -532,6 +624,10 @@ std::string colorizeAnalysisReport(const std::string& report, bool color) {
             output += colorizeJudgementToken(line, "mistake", true);
         else if (startsWith(line, "inaccuracy:"))
             output += colorizeJudgementToken(line, "inaccuracy", true);
+        else if (startsWith(line, "timeout:"))
+            output += colorizeJudgementToken(line, "timeout", true);
+        else if (startsWith(line, "game:"))
+            output += colorizeGameStatusLine(line, true);
         else
             output += line;
         output += "\n";
@@ -560,14 +656,82 @@ std::string displayAnalysisReport(const std::string& report, bool color, bool in
     return colorizeAnalysisReport(include_fen ? report : stripFenFields(report), color);
 }
 
+std::string formatTimeoutReport(const std::vector<LogEntry>& entries, int display_total) {
+    if (entries.empty())
+        return "";
+
+    const auto& entry = entries.back();
+    size_t fullmove_width = std::to_string(std::max(1, display_total)).size();
+    bool white = sideToMoveSign(entry.position) == +1;
+    int clock = parseIntField(entry.logged_go, white ? "wtime" : "btime");
+    if (clock < 0 || clock > 1)
+        return "";
+    if (terminalAfterMove(entry))
+        return "";
+
+    return fmt::format("{:<11} [{:>{}}/{}] {} clock reached {} on final move\n",
+                       "timeout:",
+                       entry.fullmove,
+                       fullmove_width,
+                       display_total,
+                       white ? "White" : "Black",
+                       formatMillis(clock));
+}
+
+std::string formatGameStatusReport(const std::vector<LogEntry>& entries,
+                                   const std::string& timeout_report) {
+    if (entries.empty())
+        return "";
+    if (!timeout_report.empty())
+        return fmt::format("{:<11} {}\n", "game:", "lost on time");
+
+    auto status = terminalStatusAfterMove(entries.back());
+    if (!status)
+        return "";
+
+    std::string reason = status->reason.empty() ? "" : " " + status->reason;
+    return fmt::format("{:<11} {}{}\n", "game:", status->result, reason);
+}
+
+bool sameLogEntry(const LogEntry& lhs, const LogEntry& rhs) {
+    return lhs.position == rhs.position
+        && lhs.logged_go == rhs.logged_go
+        && lhs.expected == rhs.expected;
+}
+
+std::string replaceDerivedReportLines(const std::string& report,
+                                      const std::string& game_report,
+                                      const std::string& timeout_report) {
+    std::istringstream input(report);
+    std::string output;
+    std::string line;
+    while (std::getline(input, line)) {
+        if ((!game_report.empty() || !timeout_report.empty())
+         && line == "No inaccuracies, mistakes, or blunders.")
+            continue;
+        if (startsWith(line, "game:"))
+            continue;
+        if (!startsWith(line, "timeout:"))
+            output += line + "\n";
+    }
+
+    output += timeout_report;
+    output += game_report;
+    if (output.empty())
+        output = "No inaccuracies, mistakes, or blunders.\n";
+    return output;
+}
+
 std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
                                  int analysis_failures,
                                  bool color,
-                                 bool include_fen) {
+                                 bool include_fen,
+                                 const std::string& game_report = "",
+                                 const std::string& timeout_report = "") {
     std::string output;
-    if (report.empty()) {
+    if (report.empty() && game_report.empty() && timeout_report.empty()) {
         output += "No inaccuracies, mistakes, or blunders.\n";
-    } else {
+    } else if (!report.empty()) {
         AnalysisWidths widths = analysisWidths(report);
         for (const auto& entry : report)
             output += formatAnalysisEntry(entry, widths, color, include_fen) + "\n";
@@ -575,6 +739,8 @@ std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
 
     if (analysis_failures > 0)
         output += fmt::format("Analysis failures  : {}\n", analysis_failures);
+    output += timeout_report;
+    output += game_report;
 
     return output;
 }
@@ -1708,6 +1874,9 @@ int main(int argc, char* argv[]) {
         }
 
         std::optional<AnalysisCache> cache;
+        LogEntry final_log_entry = entries.back();
+        std::string full_log_timeout_report = formatTimeoutReport(entries, final_log_entry.fullmove);
+        std::string full_log_game_report = formatGameStatusReport(entries, full_log_timeout_report);
         if (cache_enabled) {
             if (!executableExists(engine_path)) {
                 fmt::print(stderr, "ERROR: Engine '{}' not found or not executable\n", engine_path);
@@ -1734,6 +1903,16 @@ int main(int argc, char* argv[]) {
                     size_t newline = cached_report.find('\n');
                     cached_provenance = cached_report.substr(0, newline);
                     cached_body = newline == std::string::npos ? "" : cached_report.substr(newline + 1);
+                }
+                std::string updated_body = replaceDerivedReportLines(cached_body,
+                                                                     full_log_game_report,
+                                                                     full_log_timeout_report);
+                if (updated_body != cached_body) {
+                    cached_body = updated_body;
+                    std::string updated_report = cached_provenance.empty()
+                        ? cached_body
+                        : cached_provenance + "\n" + cached_body;
+                    writeFile(report_path, updated_report);
                 }
 
                 if (!batch_mode)
@@ -1883,12 +2062,18 @@ int main(int argc, char* argv[]) {
         fmt::print("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl);
 
         if (analyze) {
-            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures, false, true);
+            bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
+            std::string timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
+            std::string game_report = includes_final_log_entry ? full_log_game_report : "";
+            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures,
+                                                                    false, true,
+                                                                    game_report, timeout_report);
             std::string analysis_report = cache
                 ? cache->provenance + "\n" + analysis_report_body
                 : analysis_report_body;
             fmt::print("\n=== Analysis ===\n{}",
-                       formatAnalysisReport(report, analysis_failures, color_output, verbose));
+                       formatAnalysisReport(report, analysis_failures, color_output, verbose,
+                                            game_report, timeout_report));
             if (cache_enabled) {
                 writeFile(report_path, analysis_report);
                 fmt::print("Analysis saved     : {}\n", report_path.string());

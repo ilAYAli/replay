@@ -40,6 +40,14 @@ FEN in the saved report is optional metadata. Enyo logs include
 `search_position start: fen=...`; other UCI logs usually do not. Replay shows
 FENs in console output only with `--verbose`.
 
+If the final logged side-to-move clock reaches 1ms and the final move does not
+leave checkmate, stalemate, a 50-move draw, or basic insufficient material,
+replay adds a final `timeout:` line to the report. This is inferred from the UCI
+`go wtime/btime` command; the actual game termination still belongs in PGN or
+bot/server logs.
+When the final status can be inferred from the log, replay also adds a `game:`
+line after any `timeout:` line, from the logged engine's perspective.
+
 If `game.pgn` exists next to `game.log`, replay uses the PGN mainline length
 to ignore post-game searches left in the log after the actual final move.
 

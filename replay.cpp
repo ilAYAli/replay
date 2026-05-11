@@ -2066,6 +2066,26 @@ int main(int argc, char* argv[]) {
                 engine.reset();
         }
 
+        std::string analysis_report_body;
+        std::string game_report;
+        std::string timeout_report;
+        if (analyze) {
+            bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
+            timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
+            game_report = includes_final_log_entry ? full_log_game_report : "";
+            analysis_report_body = formatAnalysisReport(report, analysis_failures,
+                                                        false, true,
+                                                        game_report, timeout_report);
+            std::string analysis_report = cache
+                ? cache->provenance + "\n" + analysis_report_body
+                : analysis_report_body;
+            if (cache_enabled) {
+                fmt::print("\n");
+                writeFile(report_path, analysis_report);
+                fmt::print("Analysis saved     : {}\n", report_path.string());
+            }
+        }
+
         fmt::print("\n=== Summary ===\n");
         fmt::print("Positions replayed : {}\n", searched);
         fmt::print("Bestmove matches   : {}/{} ({} differed)\n",
@@ -2074,22 +2094,9 @@ int main(int argc, char* argv[]) {
         fmt::print("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl);
 
         if (analyze) {
-            bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
-            std::string timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
-            std::string game_report = includes_final_log_entry ? full_log_game_report : "";
-            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures,
-                                                                    false, true,
-                                                                    game_report, timeout_report);
-            std::string analysis_report = cache
-                ? cache->provenance + "\n" + analysis_report_body
-                : analysis_report_body;
             fmt::print("\n=== Analysis ===\n{}",
                        formatAnalysisReport(report, analysis_failures, color_output, verbose,
                                             game_report, timeout_report));
-            if (cache_enabled) {
-                writeFile(report_path, analysis_report);
-                fmt::print("Analysis saved     : {}\n", report_path.string());
-            }
         }
     } catch (const std::exception& e) {
         fmt::print(stderr, "Error: {}\n", e.what());

@@ -1746,6 +1746,7 @@ int main(int argc, char* argv[]) {
     bool time_mode = false;
     bool analyze = true;
     bool verbose = false;
+    bool explain_cache = false;
     bool color_output = false;
     bool force = false;
     bool engine_path_explicit = false;
@@ -1773,6 +1774,7 @@ int main(int argc, char* argv[]) {
             "  --threads N         Send `setoption name Threads value N`\n"
             "  --force             Ignore existing analysis files and analyze again\n"
             "  --color             Color judgement output\n"
+            "  --explain-cache     Print cache path and cache key inputs\n"
             "  --verbose, -v       Print full UCI traffic, cache hashes, and FENs\n"
             "  --help, -h          Show this help and exit\n",
             prog);
@@ -1810,6 +1812,8 @@ int main(int argc, char* argv[]) {
             force = true;
         } else if (arg == "--color") {
             color_output = true;
+        } else if (arg == "--explain-cache") {
+            explain_cache = true;
         } else if (arg == "--verbose" || arg == "-v") {
             verbose = true;
         } else if (arg.rfind("--", 0) == 0) {
@@ -1938,10 +1942,10 @@ int main(int argc, char* argv[]) {
                     writeFile(report_path, updated_report);
                 }
 
-                if (!batch_mode)
+                if (!batch_mode || explain_cache)
                     fmt::print("cached: {}\n", report_path.string());
-                if (verbose && !cached_provenance.empty())
-                    fmt::print("{}\n", cached_provenance);
+                if (verbose || explain_cache)
+                    fmt::print("{}\n", cache->provenance);
                 fmt::print("{}",
                            displayAnalysisReport(cached_body, color_output, verbose));
                 if (cached_body.empty() || cached_body.back() != '\n')
@@ -1953,7 +1957,9 @@ int main(int argc, char* argv[]) {
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
         fmt::print("Extracted {} go commands and {} bestmoves\n", total_entries, total_entries);
-        if (verbose && cache)
+        if (explain_cache && cache)
+            fmt::print("cache: {}\n", report_path.string());
+        if ((verbose || explain_cache) && cache)
             fmt::print("{}\n", cache->provenance);
 
         if (start_move > 0) {

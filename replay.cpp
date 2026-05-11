@@ -745,6 +745,17 @@ std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
     return output;
 }
 
+bool reportTriggersFailure(const std::string& report) {
+    std::istringstream input(report);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (startsWith(line, "blunder:") || startsWith(line, "timeout:"))
+            return true;
+    }
+
+    return false;
+}
+
 bool executableExists(const std::string& path) {
     if (path.find('/') != std::string::npos)
         return access(path.c_str(), X_OK) == 0;
@@ -1935,7 +1946,7 @@ int main(int argc, char* argv[]) {
                            displayAnalysisReport(cached_body, color_output, verbose));
                 if (cached_body.empty() || cached_body.back() != '\n')
                     fmt::print("\n");
-                return 0;
+                return reportTriggersFailure(cached_body) ? 1 : 0;
             }
         }
 
@@ -2100,6 +2111,8 @@ int main(int argc, char* argv[]) {
                        formatAnalysisReport(report, analysis_failures, color_output, verbose,
                                             game_report, timeout_report));
         }
+
+        return reportTriggersFailure(analysis_report_body) ? 1 : 0;
     } catch (const std::exception& e) {
         fmt::print(stderr, "Error: {}\n", e.what());
         return 1;

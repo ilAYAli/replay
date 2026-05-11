@@ -67,6 +67,7 @@ parentheses and the reference engine's best move/score appended when analyzed.
 The end report is saved beside the log as `game.<analysis-key>_<target>_analysis`,
 for example `game.91c8a4d2_rpl_analysis` or
 `game.91c8a4d2_log_analysis`.
+`replay` exits nonzero when the report contains a blunder or timeout.
 The key hashes the log, sibling PGN when present, replay/analysis mode,
 candidate/reference binary content and UCI output, exact setoption stream sent
 by replay, and content hashes for NNUE/file-valued options that exist locally.

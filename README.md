@@ -36,9 +36,9 @@ With `--time`, replay sends the original logged `go` command instead.
 `bestmove` must be a UCI move. `setoption ...` lines, if present before the
 searches, are sent to the candidate engine before replay starts.
 
-FEN in the final report is optional metadata. Enyo logs include
-`search_position start: fen=...`; other UCI logs usually do not. Replay prints
-FENs when it can find them and ignores missing FENs.
+FEN in the saved report is optional metadata. Enyo logs include
+`search_position start: fen=...`; other UCI logs usually do not. Replay shows
+FENs in console output only with `--verbose`.
 
 If `game.pgn` exists next to `game.log`, replay uses the PGN mainline length
 to ignore post-game searches left in the log after the actual final move.
@@ -53,7 +53,7 @@ replay "game.log"
 
 At startup, replay prints the candidate engine id/name and applied `setoption`
 commands. Static UCI options, `id author`, and handshake lines are hidden by
-default; use `--verbose` to print full UCI traffic.
+default; use `--verbose` to print full UCI traffic, cache hashes, and FENs.
 Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 
@@ -78,6 +78,12 @@ The engine can also be positional:
 
 ```sh
 replay ../assets/engines/enyo_ee7052f "game.log"
+```
+
+Replay several matching logs; non-`.log` matches are ignored:
+
+```sh
+replay *_oot*
 ```
 
 Start at a fullmove number and replay one logged engine move:

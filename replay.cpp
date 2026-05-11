@@ -471,14 +471,15 @@ AnalysisWidths analysisWidths(const std::vector<AnalysisEntry>& entries) {
 
 std::string formatAnalysisEntry(const AnalysisEntry& entry,
                                 const AnalysisWidths& widths,
-                                bool color) {
+                                bool color,
+                                bool include_fen) {
     std::string label = colorizeJudgementToken(fmt::format("{:<11}", entry.label + ":"),
                                                entry.label, color);
     std::string line = fmt::format("{} {:<{}}  best: {:<{}}  loss: {:>{}}",
                                    label, analysisPlayedText(entry), widths.played,
                                    entry.best, widths.best,
                                    fmt::format("{}cp", entry.cp_loss), widths.loss);
-    if (!entry.fen.empty())
+    if (include_fen && !entry.fen.empty())
         line += "  FEN: " + entry.fen;
     return line;
 }
@@ -539,16 +540,37 @@ std::string colorizeAnalysisReport(const std::string& report, bool color) {
     return output;
 }
 
+std::string stripFenFields(const std::string& report) {
+    std::istringstream input(report);
+    std::string output;
+    std::string line;
+    while (std::getline(input, line)) {
+        size_t fen = line.find("  FEN: ");
+        if (fen != std::string::npos)
+            line.erase(fen);
+        output += line + "\n";
+    }
+
+    if (!report.empty() && report.back() != '\n' && !output.empty())
+        output.pop_back();
+    return output;
+}
+
+std::string displayAnalysisReport(const std::string& report, bool color, bool include_fen) {
+    return colorizeAnalysisReport(include_fen ? report : stripFenFields(report), color);
+}
+
 std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
                                  int analysis_failures,
-                                 bool color) {
+                                 bool color,
+                                 bool include_fen) {
     std::string output;
     if (report.empty()) {
         output += "No inaccuracies, mistakes, or blunders.\n";
     } else {
         AnalysisWidths widths = analysisWidths(report);
         for (const auto& entry : report)
-            output += formatAnalysisEntry(entry, widths, color) + "\n";
+            output += formatAnalysisEntry(entry, widths, color, include_fen) + "\n";
     }
 
     if (analysis_failures > 0)
@@ -1468,20 +1490,68 @@ void trimPostGameEntriesFromSiblingPgn(std::vector<LogEntry>& entries,
         }), entries.end());
 }
 
-int runDirectory(const std::filesystem::path& directory,
-                 int argc,
-                 char* argv[],
-                 int logfile_arg_index) {
-    std::vector<std::filesystem::path> logs;
+bool containsArgIndex(const std::vector<int>& indices, int value) {
+    return std::find(indices.begin(), indices.end(), value) != indices.end();
+}
+
+bool isLogTarget(const std::string& path) {
+    return std::filesystem::path(path).extension() == ".log"
+        || std::filesystem::is_directory(path);
+}
+
+bool isPositionalEngine(const std::string& first, const std::string& second) {
+    if (isLogTarget(first) || !isLogTarget(second))
+        return false;
+    if (std::filesystem::exists(first))
+        return executableExists(first);
+    return true;
+}
+
+bool canBePositionalEngine(const std::string& path) {
+    if (isLogTarget(path))
+        return false;
+    if (std::filesystem::exists(path))
+        return executableExists(path);
+    return true;
+}
+
+bool containsLogTarget(const std::vector<std::pair<int, std::string>>& args, size_t start) {
+    for (size_t i = start; i < args.size(); ++i) {
+        if (isLogTarget(args[i].second))
+            return true;
+    }
+    return false;
+}
+
+void appendDirectoryLogs(const std::filesystem::path& directory,
+                         std::vector<std::filesystem::path>& logs) {
     for (const auto& entry : std::filesystem::directory_iterator(directory)) {
         if (!entry.is_regular_file() || entry.path().extension() != ".log")
             continue;
         logs.push_back(entry.path());
     }
-    std::sort(logs.begin(), logs.end());
+}
 
+std::vector<std::filesystem::path> collectLogTargets(const std::vector<std::string>& targets) {
+    std::vector<std::filesystem::path> logs;
+    for (const auto& target : targets) {
+        std::filesystem::path path = target;
+        if (std::filesystem::is_directory(path)) {
+            appendDirectoryLogs(path, logs);
+        } else if (path.extension() == ".log") {
+            logs.push_back(path);
+        }
+    }
+    std::sort(logs.begin(), logs.end());
+    return logs;
+}
+
+int runLogs(const std::vector<std::filesystem::path>& logs,
+            int argc,
+            char* argv[],
+            const std::vector<int>& logfile_arg_indices) {
     if (logs.empty()) {
-        fmt::print(stderr, "ERROR: No .log files found in {}\n", directory.string());
+        fmt::print(stderr, "ERROR: No .log files found\n");
         return 1;
     }
 
@@ -1492,12 +1562,19 @@ int runDirectory(const std::filesystem::path& directory,
         std::fflush(stdout);
 
         std::string command = shellQuote(argv[0]);
+        bool inserted_log = false;
         for (int arg = 1; arg < argc; ++arg) {
-            if (arg == logfile_arg_index)
-                command += " " + shellQuote(logs[i].string());
-            else
+            if (containsArgIndex(logfile_arg_indices, arg)) {
+                if (!inserted_log) {
+                    command += " " + shellQuote(logs[i].string());
+                    inserted_log = true;
+                }
+            } else {
                 command += " " + shellQuote(argv[arg]);
+            }
         }
+        if (!inserted_log)
+            command += " " + shellQuote(logs[i].string());
 
         int rc = std::system(command.c_str());
         if (rc != 0)
@@ -1529,9 +1606,10 @@ int main(int argc, char* argv[]) {
 
     auto print_help = [&](const char* prog) {
         fmt::print(
-            "Usage: {} [options] [engine] <logfile-or-directory>\n"
+            "Usage: {} [options] [engine] <logfile-or-directory> [more logs...]\n"
             "\n"
             "Replay UCI log searches and compare engine bestmoves with the log.\n"
+            "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
             "At the end, analyze replay or log moves with a reference engine.\n"
             "Full reports are saved as <log>.<analysis-key>_<target>_analysis and reused.\n"
             "\n"
@@ -1548,7 +1626,7 @@ int main(int argc, char* argv[]) {
             "  --threads N         Send `setoption name Threads value N`\n"
             "  --force             Ignore existing analysis files and analyze again\n"
             "  --no-color          Disable colored judgement output\n"
-            "  --verbose, -v       Print full UCI traffic and cache hashes\n"
+            "  --verbose, -v       Print full UCI traffic, cache hashes, and FENs\n"
             "  --help, -h          Show this help and exit\n",
             prog);
     };
@@ -1595,19 +1673,40 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    bool batch_uses_positional_engine = positional_args.size() > 2
+                                     && !engine_path_explicit
+                                     && canBePositionalEngine(positional_args[0].second)
+                                     && containsLogTarget(positional_args, 1);
+
     if (positional_args.size() == 1) {
         logfile_arg_index = positional_args[0].first;
         logfile = positional_args[0].second;
-    } else if (positional_args.size() == 2 && !engine_path_explicit) {
+    } else if (positional_args.size() == 2
+            && !engine_path_explicit
+            && isPositionalEngine(positional_args[0].second, positional_args[1].second)) {
         engine_path = positional_args[0].second;
         logfile_arg_index = positional_args[1].first;
         logfile = positional_args[1].second;
-    } else if (positional_args.size() > 1) {
-        fmt::print(stderr, "ERROR: Too many positional arguments\n");
-        return 1;
+    } else if (batch_uses_positional_engine) {
+        engine_path = positional_args[0].second;
     }
 
-    if (logfile.empty()) {
+    bool batch_input = positional_args.size() > 1 && logfile.empty();
+    std::vector<std::string> logfile_targets;
+    std::vector<int> logfile_arg_indices;
+    if (batch_input) {
+        size_t first_target = batch_uses_positional_engine ? 1 : 0;
+        for (size_t i = first_target; i < positional_args.size(); ++i) {
+            const auto& [index, path] = positional_args[i];
+            logfile_targets.push_back(path);
+            logfile_arg_indices.push_back(index);
+        }
+    } else if (!logfile.empty()) {
+        logfile_targets.push_back(logfile);
+        logfile_arg_indices.push_back(logfile_arg_index);
+    }
+
+    if (logfile_targets.empty()) {
         fmt::print(stderr, "ERROR: No logfile specified\n\n");
         print_help(argv[0]);
         return 1;
@@ -1617,7 +1716,8 @@ int main(int argc, char* argv[]) {
                       && start_move == 0
                       && count < 0;
 
-    bool logfile_is_directory = std::filesystem::is_directory(logfile);
+    bool logfile_is_directory = !batch_input && std::filesystem::is_directory(logfile);
+    bool run_as_batch = batch_input || logfile_is_directory;
     bool warn_log_time = analyze
                       && time_mode
                       && analysis_target == "log"
@@ -1626,12 +1726,12 @@ int main(int argc, char* argv[]) {
         fmt::print(stderr,
                    "WARNING: --time affects candidate replay only; "
                    "--analyse log analyzes fixed log moves.\n");
-        if (logfile_is_directory)
+        if (run_as_batch)
             setenv(kSuppressLogTimeWarning, "1", 1);
     }
 
-    if (logfile_is_directory)
-        return runDirectory(logfile, argc, argv, logfile_arg_index);
+    if (run_as_batch)
+        return runLogs(collectLogTargets(logfile_targets), argc, argv, logfile_arg_indices);
 
     if (std::filesystem::path(logfile).extension() == ".pgn") {
         fmt::print(stderr, "ERROR: replay needs an Enyo .log file.\n");
@@ -1679,13 +1779,11 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (!batch_mode)
-                    fmt::print("Analysis reused: {}\n", report_path.string());
+                    fmt::print("cached: {}\n", report_path.string());
                 if (verbose && !cached_provenance.empty())
                     fmt::print("{}\n", cached_provenance);
-                if (!batch_mode)
-                    fmt::print("=== Analysis ===\n");
                 fmt::print("{}",
-                           colorizeAnalysisReport(cached_body, color_output));
+                           displayAnalysisReport(cached_body, color_output, verbose));
                 if (cached_body.empty() || cached_body.back() != '\n')
                     fmt::print("\n");
                 return 0;
@@ -1830,12 +1928,12 @@ int main(int argc, char* argv[]) {
         fmt::print("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl);
 
         if (analyze) {
-            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures, false);
+            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures, false, true);
             std::string analysis_report = cache
                 ? cache->provenance + "\n" + analysis_report_body
                 : analysis_report_body;
             fmt::print("\n=== Analysis ===\n{}",
-                       formatAnalysisReport(report, analysis_failures, color_output));
+                       formatAnalysisReport(report, analysis_failures, color_output, verbose));
             if (cache_enabled) {
                 writeFile(report_path, analysis_report);
                 fmt::print("Analysis saved     : {}\n", report_path.string());

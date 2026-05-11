@@ -1557,7 +1557,7 @@ int main(int argc, char* argv[]) {
     bool time_mode = false;
     bool analyze = true;
     bool verbose = false;
-    bool color_output = true;
+    bool color_output = false;
     bool force = false;
     bool engine_path_explicit = false;
     std::vector<std::pair<int, std::string>> positional_args;
@@ -1583,7 +1583,7 @@ int main(int argc, char* argv[]) {
             "  --time              Replay with the original logged go wtime/btime command\n"
             "  --threads N         Send `setoption name Threads value N`\n"
             "  --force             Ignore existing analysis files and analyze again\n"
-            "  --no-color          Disable colored judgement output\n"
+            "  --color             Color judgement output\n"
             "  --verbose, -v       Print full UCI traffic, cache hashes, and FENs\n"
             "  --help, -h          Show this help and exit\n",
             prog);
@@ -1619,8 +1619,8 @@ int main(int argc, char* argv[]) {
             time_mode = true;
         } else if (arg == "--force") {
             force = true;
-        } else if (arg == "--no-color") {
-            color_output = false;
+        } else if (arg == "--color") {
+            color_output = true;
         } else if (arg == "--verbose" || arg == "-v") {
             verbose = true;
         } else if (arg.rfind("--", 0) == 0) {

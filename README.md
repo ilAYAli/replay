@@ -93,6 +93,8 @@ Replay several matching logs; non-`.log` matches are ignored:
 replay *_oot*
 ```
 
+Pressing `Ctrl+C` during a batch run stops the whole batch.
+
 Start at a fullmove number and replay one logged engine move:
 
 ```sh

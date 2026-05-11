@@ -1670,6 +1670,16 @@ std::vector<std::filesystem::path> collectLogTargets(const std::vector<std::stri
     return logs;
 }
 
+bool interruptedStatus(int status) {
+    if (status == -1)
+        return false;
+    if (WIFSIGNALED(status))
+        return WTERMSIG(status) == SIGINT || WTERMSIG(status) == SIGQUIT;
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status) == 128 + SIGINT || WEXITSTATUS(status) == 128 + SIGQUIT;
+    return false;
+}
+
 int runLogs(const std::vector<std::filesystem::path>& logs,
             int argc,
             char* argv[],
@@ -1701,6 +1711,8 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             command += " " + shellQuote(logs[i].string());
 
         int rc = std::system(command.c_str());
+        if (interruptedStatus(rc))
+            return 128 + SIGINT;
         if (rc != 0)
             failures++;
     }

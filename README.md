@@ -60,7 +60,7 @@ replay "game.log"
 ```
 
 Candidate engine initialization is hidden by default; use `--verbose` to print
-full UCI traffic and FENs.
+full UCI traffic, cache hashes, and FENs.
 Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 
@@ -73,7 +73,7 @@ candidate/reference binary content and UCI output, exact setoption stream sent
 by replay, and content hashes for NNUE/file-valued options that exist locally.
 If that file already exists, replay reuses it and skips the log.
 Limited/debug runs such as `--move` and `--count` are not cached.
-Use `--explain-cache` to print the cache path and provenance hashes, for example:
+Use `--verbose` to print the cache provenance hashes, for example:
 `analysis-key 91c8a4d2 | candidate cfg 7d2a4b10 | reference cfg 41f0aa29 | log b13c9a02 | target log | ref-depth 20 | nnue2 d43206fe`.
 
 Replay one log with an explicit engine:
@@ -128,12 +128,6 @@ Re-analyze even when a matching analysis file already exists:
 
 ```sh
 replay --force "game.log"
-```
-
-Explain which cache key replay is using:
-
-```sh
-replay --explain-cache "game.log"
 ```
 
 Replay without the end analysis:

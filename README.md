@@ -125,8 +125,8 @@ Replay without the end analysis:
 replay --no-analysis "game.log"
 ```
 
-Disable colored console output:
+Color judgement labels in console output:
 
 ```sh
-replay --no-color "game.log"
+replay --color "game.log"
 ```

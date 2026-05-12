@@ -124,6 +124,8 @@ bool startsWith(const std::string& line, const std::string& prefix) {
     return line.rfind(prefix, 0) == 0;
 }
 
+std::string trim(std::string text);
+
 bool isDiagnosticLine(const std::string& line) {
     return startsWith(line, "WARNING") || startsWith(line, "ERROR");
 }
@@ -146,6 +148,27 @@ std::string formatDiagnosticLine(const std::string& line, bool color, bool inclu
     if (startsWith(output, "WARNING"))
         return "\033[33mWARNING\033[0m" + output.substr(7);
     return output;
+}
+
+std::string formatDiagnosticLine(const std::string& line,
+                                 int fullmove,
+                                 int display_total,
+                                 bool color,
+                                 bool include_fen) {
+    std::string output = include_fen ? line : stripDiagnosticFen(line);
+    std::string kind = startsWith(output, "ERROR") ? "ERROR" : "WARNING";
+    std::string label = color
+        ? (kind == "ERROR" ? "\033[31mERROR\033[0m" : "\033[33mWARNING\033[0m")
+        : kind;
+    std::string body = output.substr(kind.size());
+    if (!body.empty() && body.front() == ':')
+        body.erase(body.begin());
+    body = trim(body);
+
+    size_t fullmove_width = std::to_string(std::max(1, display_total)).size();
+    return fmt::format("{}: [{:>{}}/{}]{}",
+                       label, fullmove, fullmove_width, display_total,
+                       body.empty() ? "" : " " + body);
 }
 
 std::string trim(std::string text) {
@@ -172,7 +195,10 @@ std::string extractMove(const std::string& line) {
 }
 
 std::string extractEmergencyMove(const std::string& line) {
-    if (!startsWith(line, "EMERGENCY_MOVE:"))
+    std::string normalized = lower(line);
+    if (!startsWith(line, "EMERGENCY_MOVE:")
+     && !startsWith(normalized, "warning: emergency_move")
+     && !startsWith(normalized, "warning: emergency move"))
         return "";
 
     size_t start = line.find("move=");
@@ -695,6 +721,19 @@ std::string displayAnalysisReport(const std::string& report, bool color, bool in
     return colorizeAnalysisReport(include_fen ? report : stripFenFields(report), color);
 }
 
+std::string formatDiagnosticsReport(const std::vector<LogEntry>& entries,
+                                    int display_total,
+                                    bool color,
+                                    bool include_fen) {
+    std::string output;
+    for (const auto& entry : entries) {
+        for (const auto& diagnostic : entry.diagnostics)
+            output += formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                           color, include_fen) + "\n";
+    }
+    return output;
+}
+
 std::string formatTimeoutReport(const std::vector<LogEntry>& entries, int display_total) {
     if (entries.empty())
         return "";
@@ -1213,7 +1252,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                                    analysis_depth));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v5\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v6\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
@@ -1516,11 +1555,6 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         if (!waiting_for_bestmove)
             continue;
 
-        if (isDiagnosticLine(line)) {
-            pending_diagnostics.push_back(line);
-            continue;
-        }
-
         if (startsWith(line, "search_position start:"))
             pending_fen = extractSearchFen(line);
 
@@ -1530,6 +1564,8 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         std::string move = extractMove(line);
         if (move.empty())
             move = extractEmergencyMove(line);
+        if (isDiagnosticLine(line))
+            pending_diagnostics.push_back(line);
         if (move.empty())
             continue;
 
@@ -2010,6 +2046,9 @@ int main(int argc, char* argv[]) {
                 if (verbose)
                     fmt::print("{}\n", cache->provenance);
                 fmt::print("{}",
+                           formatDiagnosticsReport(entries, final_log_entry.fullmove,
+                                                   color_output, verbose));
+                fmt::print("{}",
                            displayAnalysisReport(cached_body, color_output, verbose));
                 if (cached_body.empty() || cached_body.back() != '\n')
                     fmt::print("\n");
@@ -2139,9 +2178,11 @@ int main(int argc, char* argv[]) {
                        replay_display, line_widths.replay,
                        result.wdl, reference_suffix);
             for (const auto& diagnostic : entry.diagnostics)
-                fmt::print("{}\n", formatDiagnosticLine(diagnostic, color_output, verbose));
+                fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                                        color_output, verbose));
             for (const auto& diagnostic : result.diagnostics)
-                fmt::print("{}\n", formatDiagnosticLine(diagnostic, color_output, verbose));
+                fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                                        color_output, verbose));
             fflush(stdout);
 
             if (mismatch)

@@ -1498,6 +1498,7 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
     std::string pending_position;
     std::string pending_go;
     std::string pending_fen;
+    std::string pending_fallback_move;
     std::vector<std::string> pending_diagnostics;
     int pending_depth = 0;
     bool waiting_for_bestmove = false;
@@ -1526,6 +1527,7 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         pending_position.clear();
         pending_go.clear();
         pending_fen.clear();
+        pending_fallback_move.clear();
         pending_diagnostics.clear();
     };
 
@@ -1536,15 +1538,20 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         }
 
         if (startsWith(line, "position ")) {
+            if (waiting_for_bestmove && !pending_fallback_move.empty())
+                finish_pending_move(pending_fallback_move);
             current_position = line;
             continue;
         }
 
         if (startsWith(line, "go ")) {
+            if (waiting_for_bestmove && !pending_fallback_move.empty())
+                finish_pending_move(pending_fallback_move);
             if (!current_position.empty()) {
                 pending_position = current_position;
                 pending_go = line;
                 pending_fen.clear();
+                pending_fallback_move.clear();
                 pending_diagnostics.clear();
                 pending_depth = 0;
                 waiting_for_bestmove = true;
@@ -1561,16 +1568,22 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         if (line.find("info depth ") != std::string::npos)
             pending_depth = std::max(pending_depth, extractDepth(line));
 
-        std::string move = extractMove(line);
-        if (move.empty())
-            move = extractEmergencyMove(line);
         if (isDiagnosticLine(line))
             pending_diagnostics.push_back(line);
-        if (move.empty())
-            continue;
 
-        finish_pending_move(move);
+        std::string move = extractMove(line);
+        if (!move.empty()) {
+            finish_pending_move(move);
+            continue;
+        }
+
+        std::string fallback_move = extractEmergencyMove(line);
+        if (!fallback_move.empty())
+            pending_fallback_move = fallback_move;
     }
+
+    if (waiting_for_bestmove && !pending_fallback_move.empty())
+        finish_pending_move(pending_fallback_move);
 
     return parsed;
 }

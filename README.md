@@ -37,7 +37,8 @@ With `--time`, replay sends the original logged `go` command instead.
 also treated as logged moves. `setoption ...` lines, if present before the
 searches, are sent to the candidate engine before replay starts.
 Lines beginning with `WARNING` or `ERROR` are printed even when `--verbose` is
-off.
+off. Search warnings are printed immediately after the move they belong to.
+FEN text inside warnings is hidden unless `--verbose` is used.
 
 FEN in the saved report is optional metadata. Enyo logs include
 `search_position start: fen=...`; other UCI logs usually do not. Replay shows

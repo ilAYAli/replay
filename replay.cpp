@@ -30,6 +30,7 @@ struct LogEntry {
     std::string replay_go;
     std::string expected;
     std::string fen;
+    std::vector<std::string> diagnostics;
     int fullmove = 1;
     int depth = 1;
 };
@@ -44,6 +45,7 @@ constexpr const char* kReplayBatch = "REPLAY_BATCH";
 
 struct SearchResult {
     std::string bestmove;
+    std::vector<std::string> diagnostics;
     double wdl = 0.0;
     int mate_in = 0;
 };
@@ -124,6 +126,26 @@ bool startsWith(const std::string& line, const std::string& prefix) {
 
 bool isDiagnosticLine(const std::string& line) {
     return startsWith(line, "WARNING") || startsWith(line, "ERROR");
+}
+
+std::string stripDiagnosticFen(std::string line) {
+    for (const std::string& marker : {" FEN: ", " fen="}) {
+        size_t pos = line.find(marker);
+        if (pos != std::string::npos)
+            line.erase(pos);
+    }
+    return line;
+}
+
+std::string formatDiagnosticLine(const std::string& line, bool color, bool include_fen) {
+    std::string output = include_fen ? line : stripDiagnosticFen(line);
+    if (!color)
+        return output;
+    if (startsWith(output, "ERROR"))
+        return "\033[31mERROR\033[0m" + output.substr(5);
+    if (startsWith(output, "WARNING"))
+        return "\033[33mWARNING\033[0m" + output.substr(7);
+    return output;
 }
 
 std::string trim(std::string text) {
@@ -1050,7 +1072,7 @@ public:
         return rc > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR));
     }
 
-    std::optional<std::string> readLine() {
+    std::optional<std::string> readLine(bool print_diagnostics = true) {
         char buffer[8192];
         if (!fgets(buffer, sizeof(buffer), engine_out))
             return std::nullopt;
@@ -1060,8 +1082,8 @@ public:
             line.pop_back();
         if (verbose)
             fmt::print("{}\n", line);
-        else if (isDiagnosticLine(line))
-            fmt::print(stderr, "{}\n", line);
+        else if (print_diagnostics && isDiagnosticLine(line))
+            fmt::print(stderr, "{}\n", formatDiagnosticLine(line, false, false));
         return line;
     }
 
@@ -1363,13 +1385,18 @@ SearchResult waitForBestmove(EngineProcess& engine,
     int mate_in = 0;
     double wdl = 0.0;
     int stm_sign = sideToMoveSign(entry.position);
+    std::vector<std::string> diagnostics;
 
     while (true) {
-        auto line = engine.readLine();
+        auto line = engine.readLine(false);
         if (!line)
             break;
         if (line->empty())
             continue;
+        if (isDiagnosticLine(*line)) {
+            diagnostics.push_back(*line);
+            continue;
+        }
 
         if (line->find("info depth ") != std::string::npos) {
             int depth = extractDepth(*line);
@@ -1400,7 +1427,7 @@ SearchResult waitForBestmove(EngineProcess& engine,
         if (startsWith(*line, "bestmove ")) {
             if (progress)
                 fmt::print("\r\033[K");
-            return {extractMove(*line), wdl, mate_in};
+            return {extractMove(*line), diagnostics, wdl, mate_in};
         }
     }
 
@@ -1432,6 +1459,7 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
     std::string pending_position;
     std::string pending_go;
     std::string pending_fen;
+    std::vector<std::string> pending_diagnostics;
     int pending_depth = 0;
     bool waiting_for_bestmove = false;
 
@@ -1450,6 +1478,7 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
             fmt::format("go depth {}", pending_depth),
             move,
             pending_fen,
+            pending_diagnostics,
             fullmoveFromPosition(pending_position),
             pending_depth
         });
@@ -1458,12 +1487,10 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         pending_position.clear();
         pending_go.clear();
         pending_fen.clear();
+        pending_diagnostics.clear();
     };
 
     while (std::getline(file, line)) {
-        if (isDiagnosticLine(line))
-            fmt::print(stderr, "{}\n", line);
-
         if (startsWith(line, "setoption ")) {
             parsed.setoptions.push_back(line);
             continue;
@@ -1479,6 +1506,7 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
                 pending_position = current_position;
                 pending_go = line;
                 pending_fen.clear();
+                pending_diagnostics.clear();
                 pending_depth = 0;
                 waiting_for_bestmove = true;
             }
@@ -1487,6 +1515,11 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
 
         if (!waiting_for_bestmove)
             continue;
+
+        if (isDiagnosticLine(line)) {
+            pending_diagnostics.push_back(line);
+            continue;
+        }
 
         if (startsWith(line, "search_position start:"))
             pending_fen = extractSearchFen(line);
@@ -2105,6 +2138,10 @@ int main(int argc, char* argv[]) {
                        entry.fullmove, line_widths.fullmove, display_total,
                        replay_display, line_widths.replay,
                        result.wdl, reference_suffix);
+            for (const auto& diagnostic : entry.diagnostics)
+                fmt::print("{}\n", formatDiagnosticLine(diagnostic, color_output, verbose));
+            for (const auto& diagnostic : result.diagnostics)
+                fmt::print("{}\n", formatDiagnosticLine(diagnostic, color_output, verbose));
             fflush(stdout);
 
             if (mismatch)

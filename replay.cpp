@@ -145,6 +145,19 @@ std::string extractMove(const std::string& line) {
     return line.substr(start, end == std::string::npos ? end : end - start);
 }
 
+std::string extractEmergencyMove(const std::string& line) {
+    if (!startsWith(line, "EMERGENCY_MOVE:"))
+        return "";
+
+    size_t start = line.find("move=");
+    if (start == std::string::npos)
+        return "";
+
+    start += 5;
+    size_t end = line.find(' ', start);
+    return line.substr(start, end == std::string::npos ? end : end - start);
+}
+
 int parseIntField(const std::string& line, const std::string& key) {
     std::string needle = " " + key + " ";
     size_t pos = line.find(needle);
@@ -1172,7 +1185,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                                    analysis_depth));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v4\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v5\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
@@ -1416,6 +1429,31 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
     int pending_depth = 0;
     bool waiting_for_bestmove = false;
 
+    auto finish_pending_move = [&](const std::string& move) {
+        if (pending_depth <= 0)
+            pending_depth = 1;
+        if (pending_fen.empty()) {
+            auto board = boardFromPosition(pending_position);
+            if (board)
+                pending_fen = board->fen();
+        }
+
+        parsed.entries.push_back({
+            pending_position,
+            pending_go,
+            fmt::format("go depth {}", pending_depth),
+            move,
+            pending_fen,
+            fullmoveFromPosition(pending_position),
+            pending_depth
+        });
+
+        waiting_for_bestmove = false;
+        pending_position.clear();
+        pending_go.clear();
+        pending_fen.clear();
+    };
+
     while (std::getline(file, line)) {
         if (startsWith(line, "setoption ")) {
             parsed.setoptions.push_back(line);
@@ -1447,26 +1485,13 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         if (line.find("info depth ") != std::string::npos)
             pending_depth = std::max(pending_depth, extractDepth(line));
 
-        if (!startsWith(line, "bestmove "))
+        std::string move = extractMove(line);
+        if (move.empty())
+            move = extractEmergencyMove(line);
+        if (move.empty())
             continue;
 
-        if (pending_depth <= 0)
-            pending_depth = 1;
-
-        parsed.entries.push_back({
-            pending_position,
-            pending_go,
-            fmt::format("go depth {}", pending_depth),
-            extractMove(line),
-            pending_fen,
-            fullmoveFromPosition(pending_position),
-            pending_depth
-        });
-
-        waiting_for_bestmove = false;
-        pending_position.clear();
-        pending_go.clear();
-        pending_fen.clear();
+        finish_pending_move(move);
     }
 
     return parsed;
@@ -1755,7 +1780,7 @@ int main(int argc, char* argv[]) {
         fmt::print(
             "Usage: {} [options] [engine] <logfile-or-directory> [more logs...]\n"
             "\n"
-            "Replay UCI log searches and compare engine bestmoves with the log.\n"
+            "Replay UCI log searches and compare engine output with logged moves.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
             "At the end, analyze replay or log moves with a reference engine.\n"
             "Full reports are saved as <log>.<analysis-key>_<target>_analysis and reused.\n"
@@ -1952,7 +1977,7 @@ int main(int argc, char* argv[]) {
 
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
-        fmt::print("Extracted {} go commands and {} bestmoves\n", total_entries, total_entries);
+        fmt::print("Extracted {} go commands and {} logged moves\n", total_entries, total_entries);
         if (verbose && cache)
             fmt::print("{}\n", cache->provenance);
 

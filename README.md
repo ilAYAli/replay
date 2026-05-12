@@ -1,7 +1,7 @@
 # replay
 
 Replay UCI log searches and compare the current engine output with the
-`bestmove` values recorded in the log.
+logged moves.
 
 `replay` is for reproducing logged engine behavior. It can also report whether
 the candidate engine's replay or log moves are inaccuracies, mistakes, or
@@ -33,7 +33,8 @@ bestmove ...
 maximum `info depth` seen before `bestmove` and replays with `go depth N`.
 With `--time`, replay sends the original logged `go` command instead.
 
-`bestmove` must be a UCI move. `setoption ...` lines, if present before the
+`bestmove` must be a UCI move. Enyo `EMERGENCY_MOVE: ... move=<uci>` lines are
+also treated as logged moves. `setoption ...` lines, if present before the
 searches, are sent to the candidate engine before replay starts.
 
 FEN in the saved report is optional metadata. Enyo logs include

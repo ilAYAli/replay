@@ -122,6 +122,10 @@ bool startsWith(const std::string& line, const std::string& prefix) {
     return line.rfind(prefix, 0) == 0;
 }
 
+bool isDiagnosticLine(const std::string& line) {
+    return startsWith(line, "WARNING") || startsWith(line, "ERROR");
+}
+
 std::string trim(std::string text) {
     while (!text.empty() && std::isspace((unsigned char)text.front()))
         text.erase(text.begin());
@@ -1056,6 +1060,8 @@ public:
             line.pop_back();
         if (verbose)
             fmt::print("{}\n", line);
+        else if (isDiagnosticLine(line))
+            fmt::print(stderr, "{}\n", line);
         return line;
     }
 
@@ -1455,6 +1461,9 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
     };
 
     while (std::getline(file, line)) {
+        if (isDiagnosticLine(line))
+            fmt::print(stderr, "{}\n", line);
+
         if (startsWith(line, "setoption ")) {
             parsed.setoptions.push_back(line);
             continue;

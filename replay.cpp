@@ -1247,7 +1247,8 @@ void waitForToken(EngineProcess& engine, const std::string& token) {
 }
 
 EngineConfig probeEngineConfig(const std::string& engine_path,
-                               const std::vector<std::string>& setoptions) {
+                               const std::vector<std::string>& setoptions,
+                               bool include_binary) {
     EngineProcess engine(engine_path, false);
     engine.send("uci");
 
@@ -1271,10 +1272,15 @@ EngineConfig probeEngineConfig(const std::string& engine_path,
     auto file_options = fileOptionDetails(uci_text, setoptions);
     auto executable_path = resolveExecutablePath(engine_path);
     std::string executable_text = executable_path ? executable_path->string() : engine_path;
-    std::string executable_hash = executable_path ? hashFileContent(*executable_path, 16) : "missing";
+    std::string executable_hash = include_binary && executable_path ? hashFileContent(*executable_path, 16) : "ignored";
     std::string config_hash = hashString(fmt::format(
         "path={}\nresolved={}\nbinary={}\nuci={}\nsetoptions={}\nfiles={}\n",
-        engine_path, executable_text, executable_hash, uci_text, setoption_text, file_options.details));
+        include_binary ? engine_path : "ignored",
+        include_binary ? executable_text : "ignored",
+        executable_hash,
+        uci_text,
+        setoption_text,
+        file_options.details));
 
     return {
         config_hash,
@@ -1385,7 +1391,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                                    confirmationDisplay(confirm_reportable)));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v14\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v15\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
@@ -2446,8 +2452,8 @@ int main(int argc, char* argv[]) {
 
             EngineConfig candidate_config = analysis_target == "log"
                 ? EngineConfig{"unused", "none"}
-                : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
-            auto reference_config = probeEngineConfig(reference_path, {});
+                : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads), true);
+            auto reference_config = probeEngineConfig(reference_path, {}, false);
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
                                        time_mode, reference_limit, analysis_target,
                                        confirm_reportable);

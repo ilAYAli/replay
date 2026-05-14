@@ -67,6 +67,10 @@ Candidate engine initialization is hidden by default; use `--verbose` to print
 full UCI traffic, cache hashes, and FENs.
 Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
+Candidate replay uses the final logged `info ... nodes N` value as `go nodes
+N`. If a search has no logged node count, replay falls back to the original
+logged `go` command. `--time` also uses the original logged `go wtime/btime`
+command for every move.
 
 Replay analysis is saved beside the log as `game.<analysis-key>_analysis`.
 Log analysis from `--log` is saved as `game.analysis`.

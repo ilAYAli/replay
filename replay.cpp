@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <fcntl.h>
@@ -35,6 +36,7 @@ struct LogEntry {
     std::vector<std::string> diagnostics;
     int fullmove = 1;
     int depth = 1;
+    long long nodes = 0;
 };
 
 struct ParsedLog {
@@ -44,6 +46,7 @@ struct ParsedLog {
 
 constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNING";
 constexpr const char* kReplayBatch = "REPLAY_BATCH";
+constexpr const char* kBatchProgressPrefix = "BATCH_PROGRESS: ";
 constexpr int kDefaultReferenceNodes = 1'000'000;
 constexpr int kConfirmReferenceNodes = 2'000'000;
 
@@ -233,6 +236,7 @@ std::string extractEmergencyMove(const std::string& line) {
 }
 
 int parseIntField(const std::string& line, const std::string& key) {
+    long long value = -1;
     std::string needle = " " + key + " ";
     size_t pos = line.find(needle);
     size_t start = 0;
@@ -247,7 +251,32 @@ int parseIntField(const std::string& line, const std::string& key) {
 
     size_t end = line.find(' ', start);
     try {
-        return std::stoi(line.substr(start, end == std::string::npos ? end : end - start));
+        value = std::stoll(line.substr(start, end == std::string::npos ? end : end - start));
+    } catch (...) {
+        return -1;
+    }
+
+    if (value < 0 || value > std::numeric_limits<int>::max())
+        return -1;
+    return (int)value;
+}
+
+long long parseLongField(const std::string& line, const std::string& key) {
+    std::string needle = " " + key + " ";
+    size_t pos = line.find(needle);
+    size_t start = 0;
+    if (pos == std::string::npos) {
+        std::string head = key + " ";
+        if (!startsWith(line, head))
+            return -1;
+        start = head.size();
+    } else {
+        start = pos + needle.size();
+    }
+
+    size_t end = line.find(' ', start);
+    try {
+        return std::stoll(line.substr(start, end == std::string::npos ? end : end - start));
     } catch (...) {
         return -1;
     }
@@ -265,7 +294,26 @@ std::string formatMillis(int milliseconds) {
     return fmt::format("{}ms", milliseconds);
 }
 
-std::string formatSearchProgress(const std::string& go_command, int current_depth) {
+std::string formatNodeCount(long long nodes) {
+    if (nodes >= 1'000'000'000)
+        return fmt::format("{:.1f}B", static_cast<double>(nodes) / 1'000'000'000.0);
+    if (nodes >= 1'000'000)
+        return fmt::format("{:.1f}M", static_cast<double>(nodes) / 1'000'000.0);
+    if (nodes >= 1'000)
+        return fmt::format("{:.1f}K", static_cast<double>(nodes) / 1'000.0);
+    return fmt::format("{}", nodes);
+}
+
+std::string formatSearchProgress(const std::string& go_command,
+                                 int current_depth,
+                                 long long current_nodes) {
+    long long target_nodes = parseLongField(go_command, "nodes");
+    if (target_nodes > 0)
+        return fmt::format("depth {} | nodes {}/{}",
+                           current_depth,
+                           formatNodeCount(std::max(0LL, current_nodes)),
+                           formatNodeCount(target_nodes));
+
     int target_depth = parseIntField(go_command, "depth");
     if (target_depth > 0)
         return fmt::format("depth {}/{}", current_depth, target_depth);
@@ -277,6 +325,24 @@ std::string formatSearchProgress(const std::string& go_command, int current_dept
                            current_depth, formatMillis(wtime), formatMillis(btime));
 
     return fmt::format("depth {}", current_depth);
+}
+
+std::string formatBatchSearchProgress(const std::string& go_command,
+                                      int fullmove,
+                                      int display_total,
+                                      int current_depth,
+                                      long long current_nodes) {
+    long long target_nodes = parseLongField(go_command, "nodes");
+    if (target_nodes > 0)
+        return fmt::format("[{}/{}] nodes {}/{} depth {}",
+                           fullmove,
+                           display_total,
+                           formatNodeCount(std::max(0LL, current_nodes)),
+                           formatNodeCount(target_nodes),
+                           current_depth);
+
+    return fmt::format("[{}/{}] {}", fullmove, display_total,
+                       formatSearchProgress(go_command, current_depth, current_nodes));
 }
 
 int moveCountFromPosition(const std::string& position) {
@@ -745,6 +811,15 @@ std::string displayAnalysisReport(const std::string& report, bool color, bool in
 
 bool batchMode() {
     return std::getenv(kReplayBatch) != nullptr;
+}
+
+void printSearchProgress(const std::string& text) {
+    if (batchMode()) {
+        fmt::print("{}{}\n", kBatchProgressPrefix, text);
+    } else {
+        fmt::print("\r\033[K{}", text);
+    }
+    std::fflush(stdout);
 }
 
 std::string batchIndent(const std::string& text) {
@@ -1349,7 +1424,7 @@ std::string confirmationDisplay(bool confirm_reportable) {
 std::string analysisModeName(bool time_mode, const ReferenceLimit& reference_limit, const std::string& analysis_target) {
     std::string mode = analysis_target == "log"
         ? "log"
-        : (time_mode ? "time" : "replay");
+        : (time_mode ? "time" : "replay_nodes");
     if (reference_limit.kind == ReferenceLimitKind::Nodes && reference_limit.value == kDefaultReferenceNodes)
         return mode;
     return fmt::format("{}_{}", mode, referenceLimitName(reference_limit));
@@ -1417,6 +1492,8 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
         referenceLimitDisplay(reference_limit),
         confirmationDisplay(confirm_reportable),
         candidate.nnue2_hash);
+    if (analysis_target != "log" && !time_mode)
+        provenance += " | candidate nodes";
 
     return {key, provenance};
 }
@@ -1733,10 +1810,20 @@ SearchResult waitForBestmove(EngineProcess& engine,
             }
 
             if (progress) {
-                fmt::print("\r\033[K{} thinking [{}/{}] {} | WDL {:+.2f} | expecting {}",
-                           sideToMoveName(entry.position), entry.fullmove, display_total,
-                           formatSearchProgress(go_command, depth), wdl, entry.expected);
-                fflush(stdout);
+                long long nodes = parseLongField(*line, "nodes");
+                if (batchMode()) {
+                    printSearchProgress(formatBatchSearchProgress(go_command,
+                                                                  entry.fullmove,
+                                                                  display_total,
+                                                                  depth,
+                                                                  nodes));
+                } else {
+                    printSearchProgress(fmt::format(
+                        "{} thinking [{}/{}] {} | WDL {:+.2f} | expecting {}",
+                        sideToMoveName(entry.position), entry.fullmove, display_total,
+                        formatSearchProgress(go_command, depth, nodes),
+                        wdl, entry.expected));
+                }
             }
         }
 
@@ -1778,11 +1865,15 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
     std::string pending_fallback_move;
     std::vector<std::string> pending_diagnostics;
     int pending_depth = 0;
+    long long pending_nodes = 0;
     bool waiting_for_bestmove = false;
 
     auto finish_pending_move = [&](const std::string& move) {
         if (pending_depth <= 0)
             pending_depth = 1;
+        std::string replay_go = pending_nodes > 0
+            ? fmt::format("go nodes {}", pending_nodes)
+            : pending_go;
         if (pending_fen.empty()) {
             auto board = boardFromPosition(pending_position);
             if (board)
@@ -1792,12 +1883,13 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         parsed.entries.push_back({
             pending_position,
             pending_go,
-            fmt::format("go depth {}", pending_depth),
+            replay_go,
             move,
             pending_fen,
             pending_diagnostics,
             fullmoveFromPosition(pending_position),
-            pending_depth
+            pending_depth,
+            pending_nodes
         });
 
         waiting_for_bestmove = false;
@@ -1806,6 +1898,7 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
         pending_fen.clear();
         pending_fallback_move.clear();
         pending_diagnostics.clear();
+        pending_nodes = 0;
     };
 
     while (std::getline(file, line)) {
@@ -1831,6 +1924,7 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
                 pending_fallback_move.clear();
                 pending_diagnostics.clear();
                 pending_depth = 0;
+                pending_nodes = 0;
                 waiting_for_bestmove = true;
             }
             continue;
@@ -1841,6 +1935,12 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
 
         if (startsWith(line, "search_position start:"))
             pending_fen = extractSearchFen(line);
+
+        if (startsWith(line, "info ")) {
+            long long nodes = parseLongField(line, "nodes");
+            if (nodes > 0)
+                pending_nodes = nodes;
+        }
 
         if (line.find("info depth ") != std::string::npos)
             pending_depth = std::max(pending_depth, extractDepth(line));
@@ -2144,8 +2244,25 @@ void printJobOutput(const std::filesystem::path& path) {
         return;
 
     std::string line;
-    while (std::getline(file, line))
+    while (std::getline(file, line)) {
+        if (startsWith(line, kBatchProgressPrefix))
+            continue;
         fmt::print("{}\n", line);
+    }
+}
+
+std::string lastJobProgress(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file.is_open())
+        return "";
+
+    std::string line;
+    std::string latest;
+    while (std::getline(file, line)) {
+        if (startsWith(line, kBatchProgressPrefix))
+            latest = line.substr(std::string_view(kBatchProgressPrefix).size());
+    }
+    return latest;
 }
 
 void printBatchProgress(const std::vector<RunningJob>& running,
@@ -2158,13 +2275,13 @@ void printBatchProgress(const std::vector<RunningJob>& running,
             oldest = job;
     }
 
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - oldest.started).count();
-    fmt::print("progress: {}/{} done, {} running, oldest {}s: {}\n",
+    std::string latest = lastJobProgress(oldest.output_path);
+    fmt::print("progress: {}/{} done, {} running | {}{}\n",
                completed,
                logs.size(),
                running.size(),
-               elapsed,
-               logs[oldest.index].filename().string());
+               logs[oldest.index].filename().string(),
+               latest.empty() ? "" : " | " + latest);
     std::fflush(stdout);
 }
 
@@ -2318,6 +2435,7 @@ int main(int argc, char* argv[]) {
             "Usage: {} [options] [engine] <logfile-or-directory> [more logs...]\n"
             "\n"
             "Replay UCI log searches and compare engine output with logged moves.\n"
+            "Candidate replay uses the logged final node count when available.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
             "At the end, analyze replayed moves with a reference engine.\n"
             "Replay reports are saved as <log>.<analysis-key>_analysis.\n"
@@ -2337,7 +2455,7 @@ int main(int argc, char* argv[]) {
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
             "  --time              Replay with the original logged go wtime/btime command;\n"
-            "                      ignored with --log\n"
+            "                      ignored with --log and overrides logged-node replay\n"
             "  --threads N         Send `setoption name Threads value N`\n"
             "  --jobs N            Run up to N logs in parallel in batch mode (default: 1)\n"
             "  --force             Ignore existing analysis files and analyze again\n"
@@ -2589,7 +2707,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (analyze && analysis_target == "log") {
-            bool progress = isatty(STDOUT_FILENO);
+            bool progress = isatty(STDOUT_FILENO) || batchMode();
             std::vector<AnalysisEntry> report;
             AnalysisStats stats;
             int analysis_failures = 0;
@@ -2640,7 +2758,7 @@ int main(int argc, char* argv[]) {
         double min_wdl = 0.0;
         double max_wdl = 0.0;
         double final_wdl = 0.0;
-        bool progress = isatty(STDOUT_FILENO);
+        bool progress = isatty(STDOUT_FILENO) || batchMode();
         std::vector<AnalysisEntry> report;
         AnalysisStats stats;
         int analysis_failures = 0;

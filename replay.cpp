@@ -1612,13 +1612,14 @@ ReferenceResult referenceSearch(EngineProcess& engine,
     int stm_sign = sideToMoveSign(position);
     int target = std::max(1, limit.value);
     int last_reported_depth = -1;
-    int last_reported_nodes = -1;
+    long long last_reported_nodes = -1;
 
     resetReference(engine);
 
     if (progress) {
         if (limit.kind == ReferenceLimitKind::Nodes)
-            fmt::print("\r\033[K{} nodes 0/{}", progress_text, target);
+            fmt::print("\r\033[K{} nodes {}/{}", progress_text,
+                       formatNodeCount(0), formatNodeCount(target));
         else
             fmt::print("\r\033[K{} depth 0/{}", progress_text, target);
         fflush(stdout);
@@ -1641,11 +1642,13 @@ ReferenceResult referenceSearch(EngineProcess& engine,
         updateReferenceScore(result, *line, stm_sign);
         if (progress && line->find("info depth ") != std::string::npos) {
             if (limit.kind == ReferenceLimitKind::Nodes) {
-                int current_nodes = parseIntField(*line, "nodes");
+                long long current_nodes = parseLongField(*line, "nodes");
                 if (current_nodes > 0 && current_nodes != last_reported_nodes) {
                     last_reported_nodes = current_nodes;
                     fmt::print("\r\033[K{} nodes {}/{}", progress_text,
-                               std::min(current_nodes, target), target);
+                               formatNodeCount(std::min(current_nodes,
+                                                        static_cast<long long>(target))),
+                               formatNodeCount(target));
                     fflush(stdout);
                 }
             } else {

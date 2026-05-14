@@ -43,6 +43,8 @@ struct ParsedLog {
 
 constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNING";
 constexpr const char* kReplayBatch = "REPLAY_BATCH";
+constexpr int kDefaultReferenceNodes = 1'000'000;
+constexpr int kConfirmReferenceNodes = 5'000'000;
 
 struct SearchResult {
     std::string bestmove;
@@ -77,6 +79,7 @@ struct MoveValidation {
     std::string best_display;
     std::string best_score;
     int cp_loss = 0;
+    double accuracy = 100.0;
 };
 
 struct AnalysisEntry {
@@ -88,6 +91,12 @@ struct AnalysisEntry {
     int fullmove = 1;
     int display_total = 1;
     int cp_loss = 0;
+};
+
+struct AnalysisStats {
+    int moves = 0;
+    long long cp_loss = 0;
+    double accuracy = 0.0;
 };
 
 struct AnalysisWidths {
@@ -114,7 +123,7 @@ enum class ReferenceLimitKind {
 
 struct ReferenceLimit {
     ReferenceLimitKind kind = ReferenceLimitKind::Nodes;
-    int value = 1'000'000;
+    int value = kDefaultReferenceNodes;
 };
 
 struct AnalysisCache {
@@ -563,6 +572,14 @@ std::string lichessJudgement(Score best, Score played) {
     return lichessMateJudgement(best, played);
 }
 
+double lichessAccuracy(Score best, Score played) {
+    int best_cp = scoreAsCp(best);
+    int played_cp = scoreAsCp(played);
+    double win_diff = std::max(0.0, lichessWinningChances(best_cp) - lichessWinningChances(played_cp)) * 50.0;
+    double accuracy = 103.1668100711649 * std::exp(-0.04354415386753951 * win_diff) - 3.166924740191411;
+    return std::clamp(accuracy, 0.0, 100.0);
+}
+
 bool isReportableJudgement(const std::string& label) {
     return label == "inaccuracy" || label == "mistake" || label == "blunder";
 }
@@ -833,11 +850,16 @@ std::string replaceDerivedReportLines(const std::string& report,
                                       const std::string& timeout_report) {
     std::istringstream input(report);
     std::string output;
+    std::string accuracy_report;
     std::string line;
     while (std::getline(input, line)) {
         if ((!game_report.empty() || !timeout_report.empty())
          && line == "No inaccuracies, mistakes, or blunders.")
             continue;
+        if (startsWith(line, "accuracy:")) {
+            accuracy_report += line + "\n";
+            continue;
+        }
         if (startsWith(line, "game:"))
             continue;
         if (!startsWith(line, "timeout:"))
@@ -845,13 +867,24 @@ std::string replaceDerivedReportLines(const std::string& report,
     }
 
     output += timeout_report;
+    output += accuracy_report;
     output += game_report;
     if (output.empty())
         output = "No inaccuracies, mistakes, or blunders.\n";
     return output;
 }
 
+std::string formatAccuracyReport(const AnalysisStats& stats) {
+    if (stats.moves == 0)
+        return "";
+
+    int accuracy = std::clamp(static_cast<int>(std::lround(stats.accuracy / stats.moves)), 0, 100);
+    int avg_loss = static_cast<int>(std::lround(static_cast<double>(stats.cp_loss) / stats.moves));
+    return fmt::format("{:<11} {}%  avg loss: {}cp\n", "accuracy:", accuracy, avg_loss);
+}
+
 std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
+                                 const AnalysisStats& stats,
                                  int analysis_failures,
                                  bool color,
                                  bool include_fen,
@@ -869,6 +902,7 @@ std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
     if (analysis_failures > 0)
         output += fmt::format("Analysis failures  : {}\n", analysis_failures);
     output += timeout_report;
+    output += formatAccuracyReport(stats);
     output += game_report;
 
     return output;
@@ -1281,11 +1315,23 @@ std::string referenceLimitDisplay(const ReferenceLimit& limit) {
     return "ref-limit unknown";
 }
 
+bool shouldConfirmReportableMoves(const ReferenceLimit& limit, bool reference_limit_explicit) {
+    return !reference_limit_explicit
+        && limit.kind == ReferenceLimitKind::Nodes
+        && limit.value == kDefaultReferenceNodes;
+}
+
+std::string confirmationDisplay(bool confirm_reportable) {
+    if (!confirm_reportable)
+        return "confirm none";
+    return fmt::format("confirm-nodes {}", kConfirmReferenceNodes);
+}
+
 std::string analysisModeName(bool time_mode, const ReferenceLimit& reference_limit, const std::string& analysis_target) {
     std::string mode = analysis_target == "log"
         ? "log"
         : (time_mode ? "time" : "replay");
-    if (reference_limit.kind == ReferenceLimitKind::Nodes && reference_limit.value == 1'000'000)
+    if (reference_limit.kind == ReferenceLimitKind::Nodes && reference_limit.value == kDefaultReferenceNodes)
         return mode;
     return fmt::format("{}_{}", mode, referenceLimitName(reference_limit));
 }
@@ -1324,7 +1370,8 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                  const EngineConfig& reference,
                                  bool time_mode,
                                  const ReferenceLimit& reference_limit,
-                                 const std::string& analysis_target) {
+                                 const std::string& analysis_target,
+                                 bool confirm_reportable) {
     auto pgn_path = logfile;
     pgn_path.replace_extension(".pgn");
 
@@ -1332,22 +1379,24 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
     std::string pgn_hash = std::filesystem::exists(pgn_path) ? hashFileContent(pgn_path) : "none";
     std::string input_hash = hashString(fmt::format("log={}\npgn={}\n", log_hash, pgn_hash));
     std::string mode = analysisModeName(time_mode, reference_limit, analysis_target);
-    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\nref-limit={}\nref-state=fresh\n",
+    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\nref-limit={}\nref-state=fresh\nconfirm={}\n",
                                                    mode, time_mode, analysis_target,
-                                                   referenceLimitName(reference_limit)));
+                                                   referenceLimitName(reference_limit),
+                                                   confirmationDisplay(confirm_reportable)));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v12\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v14\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
-        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | {} | ref-state fresh | nnue2 {}",
+        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | {} | {} | ref-state fresh | nnue2 {}",
         key,
         candidate.hash,
         reference.hash,
         input_hash,
         analysis_target,
         referenceLimitDisplay(reference_limit),
+        confirmationDisplay(confirm_reportable),
         candidate.nnue2_hash);
 
     return {key, provenance};
@@ -1473,7 +1522,8 @@ MoveValidation validateMove(EngineProcess& reference,
                             int logged_depth,
                             int fullmove,
                             int display_total,
-                            bool progress) {
+                            bool progress,
+                            std::string_view progress_verb = "analyzing") {
     MoveValidation validation;
     if (played_move.empty() || played_move == "(none)") {
         validation.error = "no played move";
@@ -1485,8 +1535,8 @@ MoveValidation validateMove(EngineProcess& reference,
                                           position,
                                           resolved_limit,
                                           progress,
-                                          fmt::format("analyzing [{}/{}] reference-best",
-                                                      fullmove, display_total));
+                                          fmt::format("{} [{}/{}] reference-best",
+                                                      progress_verb, fullmove, display_total));
     if (!best.has_score) {
         validation.error = "reference returned no score";
         return validation;
@@ -1508,8 +1558,8 @@ MoveValidation validateMove(EngineProcess& reference,
                                             position,
                                             resolved_limit,
                                             progress,
-                                            fmt::format("analyzing [{}/{}] played-move",
-                                                        fullmove, display_total),
+                                            fmt::format("{} [{}/{}] played-move",
+                                                        progress_verb, fullmove, display_total),
                                             played_move);
     if (!played.has_score) {
         validation.error = "reference returned no score";
@@ -1522,11 +1572,44 @@ MoveValidation validateMove(EngineProcess& reference,
 
     validation.ok = true;
     validation.cp_loss = std::clamp(best_cp - played_cp, 0, 1000);
+    validation.accuracy = lichessAccuracy(best_score, played_score);
     validation.label = lichessJudgement(best_score, played_score);
     return validation;
 }
 
+MoveValidation validateMoveWithConfirmation(EngineProcess& reference,
+                                            const std::string& position,
+                                            const std::string& played_move,
+                                            const ReferenceLimit& limit,
+                                            bool confirm_reportable,
+                                            int logged_depth,
+                                            int fullmove,
+                                            int display_total,
+                                            bool progress) {
+    MoveValidation validation = validateMove(reference,
+                                             position,
+                                             played_move,
+                                             limit,
+                                             logged_depth,
+                                             fullmove,
+                                             display_total,
+                                             progress);
+    if (!confirm_reportable || !isReportableJudgement(validation.label))
+        return validation;
+
+    return validateMove(reference,
+                        position,
+                        played_move,
+                        {ReferenceLimitKind::Nodes, kConfirmReferenceNodes},
+                        logged_depth,
+                        fullmove,
+                        display_total,
+                        progress,
+                        "confirming");
+}
+
 void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
+                         AnalysisStats& stats,
                          int& analysis_failures,
                          const MoveValidation& validation,
                          const LogEntry& entry,
@@ -1537,6 +1620,10 @@ void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
         analysis_failures++;
         return;
     }
+
+    stats.moves++;
+    stats.cp_loss += validation.cp_loss;
+    stats.accuracy += validation.accuracy;
 
     if (!isReportableJudgement(validation.label))
         return;
@@ -1562,23 +1649,26 @@ void analyzeLoggedMoves(EngineProcess& reference,
                         bool print_move_output,
                         bool color,
                         bool include_fen,
+                        bool confirm_reportable,
                         std::vector<AnalysisEntry>& report,
+                        AnalysisStats& stats,
                         int& analysis_failures) {
     for (const auto& entry : entries) {
-        MoveValidation validation = validateMove(reference,
-                                                 entry.position,
-                                                 entry.expected,
-                                                 reference_limit,
-                                                 entry.depth,
-                                                 entry.fullmove,
-                                                 display_total,
-                                                 progress);
+        MoveValidation validation = validateMoveWithConfirmation(reference,
+                                                                 entry.position,
+                                                                 entry.expected,
+                                                                 reference_limit,
+                                                                 confirm_reportable,
+                                                                 entry.depth,
+                                                                 entry.fullmove,
+                                                                 display_total,
+                                                                 progress);
         if (progress)
             fmt::print("\r\033[K");
         if (print_move_output)
             printLogMoveLine(entry, display_total, line_widths,
                              validation, color, include_fen);
-        appendAnalysisEntry(report, analysis_failures, validation,
+        appendAnalysisEntry(report, stats, analysis_failures, validation,
                             entry, entry.expected, "", display_total);
     }
 }
@@ -2169,6 +2259,7 @@ int main(int argc, char* argv[]) {
     bool force = false;
     bool print_move_output = true;
     bool engine_path_explicit = false;
+    bool reference_limit_explicit = false;
     std::vector<std::pair<int, std::string>> positional_args;
 
     auto print_help = [&](const char* prog) {
@@ -2185,7 +2276,8 @@ int main(int argc, char* argv[]) {
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
-            "  --ref-nodes N       Reference analysis nodes (default: 1000000)\n"
+            "  --ref-nodes N       Reference analysis nodes; default uses 1000000 nodes\n"
+            "                      and confirms reported moves at 5000000 nodes\n"
             "  --ref-depth N       Reference analysis depth instead of nodes; 0 follows logged depth\n"
             "  --log               Analyze logged moves instead of replayed moves;\n"
             "                      does not run the candidate engine\n"
@@ -2216,11 +2308,13 @@ int main(int argc, char* argv[]) {
             reference_path = argv[++i];
         } else if (arg == "--ref-nodes" && i + 1 < argc) {
             reference_limit = {ReferenceLimitKind::Nodes, std::max(1, std::stoi(argv[++i]))};
+            reference_limit_explicit = true;
         } else if (arg == "--ref-depth" && i + 1 < argc) {
             int depth = std::max(0, std::stoi(argv[++i]));
             reference_limit = depth == 0
                 ? ReferenceLimit{ReferenceLimitKind::LoggedDepth, 0}
                 : ReferenceLimit{ReferenceLimitKind::Depth, depth};
+            reference_limit_explicit = true;
         } else if (arg == "--log") {
             analysis_target = "log";
         } else if (arg == "--no-analysis") {
@@ -2298,6 +2392,8 @@ int main(int argc, char* argv[]) {
     bool cache_enabled = analyze
                       && start_move == 0
                       && count < 0;
+    bool confirm_reportable = analyze
+                            && shouldConfirmReportableMoves(reference_limit, reference_limit_explicit);
 
     bool logfile_is_directory = !batch_input && std::filesystem::is_directory(logfile);
     bool run_as_batch = batch_input || logfile_is_directory;
@@ -2353,7 +2449,8 @@ int main(int argc, char* argv[]) {
                 : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
             auto reference_config = probeEngineConfig(reference_path, {});
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
-                                       time_mode, reference_limit, analysis_target);
+                                       time_mode, reference_limit, analysis_target,
+                                       confirm_reportable);
             report_path = analysisPath(logfile_path, cache->key, analysis_target);
 
             if (!force && std::filesystem::exists(report_path)) {
@@ -2443,16 +2540,18 @@ int main(int argc, char* argv[]) {
         if (analyze && analysis_target == "log") {
             bool progress = isatty(STDOUT_FILENO);
             std::vector<AnalysisEntry> report;
+            AnalysisStats stats;
             int analysis_failures = 0;
 
             analyzeLoggedMoves(*reference, entries, reference_limit, display_total,
                                line_widths, progress, print_move_output,
-                               color_output, verbose, report, analysis_failures);
+                               color_output, verbose, confirm_reportable,
+                               report, stats, analysis_failures);
 
             bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
             std::string timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
             std::string game_report = includes_final_log_entry ? full_log_game_report : "";
-            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures,
+            std::string analysis_report_body = formatAnalysisReport(report, stats, analysis_failures,
                                                                     false, true,
                                                                     game_report, timeout_report);
             std::string analysis_report = cache
@@ -2492,6 +2591,7 @@ int main(int argc, char* argv[]) {
         double final_wdl = 0.0;
         bool progress = isatty(STDOUT_FILENO);
         std::vector<AnalysisEntry> report;
+        AnalysisStats stats;
         int analysis_failures = 0;
 
         for (const auto& entry : entries) {
@@ -2518,19 +2618,20 @@ int main(int argc, char* argv[]) {
                 std::string analyzed_move = analysis_target == "log"
                     ? entry.expected
                     : result.bestmove;
-                MoveValidation validation = validateMove(*reference,
-                                                         entry.position,
-                                                         analyzed_move,
-                                                         reference_limit,
-                                                         entry.depth,
-                                                         entry.fullmove,
-                                                         display_total,
-                                                         progress);
+                MoveValidation validation = validateMoveWithConfirmation(*reference,
+                                                                         entry.position,
+                                                                         analyzed_move,
+                                                                         reference_limit,
+                                                                         confirm_reportable,
+                                                                         entry.depth,
+                                                                         entry.fullmove,
+                                                                         display_total,
+                                                                         progress);
                 if (progress)
                     fmt::print("\r\033[K");
 
                 reference_suffix = formatReferenceInline(validation, color_output);
-                appendAnalysisEntry(report, analysis_failures, validation,
+                appendAnalysisEntry(report, stats, analysis_failures, validation,
                                     entry, analyzed_move,
                                     analysis_target == "replay" && mismatch ? entry.expected : "",
                                     display_total);
@@ -2565,7 +2666,7 @@ int main(int argc, char* argv[]) {
             bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
             timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
             game_report = includes_final_log_entry ? full_log_game_report : "";
-            analysis_report_body = formatAnalysisReport(report, analysis_failures,
+            analysis_report_body = formatAnalysisReport(report, stats, analysis_failures,
                                                         false, true,
                                                         game_report, timeout_report);
             std::string analysis_report = cache
@@ -2589,7 +2690,7 @@ int main(int argc, char* argv[]) {
 
         if (analyze) {
             fmt::print("\n");
-            printSummaryReport(formatAnalysisReport(report, analysis_failures, color_output, verbose,
+            printSummaryReport(formatAnalysisReport(report, stats, analysis_failures, color_output, verbose,
                                                     game_report, timeout_report),
                                color_output, verbose);
         }

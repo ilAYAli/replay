@@ -73,8 +73,10 @@ for example `game.91c8a4d2_rpl_analysis` or
 `game.91c8a4d2_log_analysis`.
 `replay` exits nonzero when the report contains a blunder or timeout.
 The key hashes the log, sibling PGN when present, replay/analysis mode,
-candidate/reference binary content and UCI output, exact setoption stream sent
-by replay, and content hashes for NNUE/file-valued options that exist locally.
+reference binary content and UCI output, and content hashes for NNUE/file-valued
+reference options that exist locally. For replay analysis it also hashes the
+candidate binary content and UCI output plus the exact setoption stream sent by
+replay.
 If that file already exists, replay reuses it and skips the log.
 Limited/debug runs such as `--move` and `--count` are not cached.
 Use `--verbose` to print the cache provenance hashes, for example:
@@ -112,8 +114,14 @@ Replay with the original logged time-control command instead of logged depth:
 replay --time --threads 4 --move 53 --count 1 "game.log"
 ```
 
-With `--analyse log`, `--time` still affects only the candidate replay; the
-report analyzes the fixed moves from the log, and replay prints a warning.
+Analyze the fixed logged moves without running the candidate engine:
+
+```sh
+replay --log "game.log"
+```
+
+With `--log`, `--time` is ignored and replay prints a warning.
+`--log` cannot be combined with `--no-analysis`.
 
 Use a specific reference engine and analysis depth. The default reference
 analysis depth is 20:

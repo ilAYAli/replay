@@ -1252,7 +1252,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                                    analysis_depth));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v6\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v7\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
@@ -1413,6 +1413,56 @@ MoveValidation validateMove(EngineProcess& reference,
     validation.cp_loss = std::clamp(best_cp - played_cp, 0, 1000);
     validation.label = lichessJudgement(best_score, played_score);
     return validation;
+}
+
+void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
+                         int& analysis_failures,
+                         const MoveValidation& validation,
+                         const LogEntry& entry,
+                         const std::string& analyzed_move,
+                         const std::string& expected_move,
+                         int display_total) {
+    if (!validation.ok) {
+        analysis_failures++;
+        return;
+    }
+
+    if (!isReportableJudgement(validation.label))
+        return;
+
+    report.push_back({
+        validation.label,
+        analyzed_move,
+        expected_move,
+        validation.bestmove,
+        entry.fen,
+        entry.fullmove,
+        display_total,
+        validation.cp_loss
+    });
+}
+
+void analyzeLoggedMoves(EngineProcess& reference,
+                        const std::vector<LogEntry>& entries,
+                        int analysis_depth,
+                        int display_total,
+                        bool progress,
+                        std::vector<AnalysisEntry>& report,
+                        int& analysis_failures) {
+    for (const auto& entry : entries) {
+        int depth = analysis_depth > 0 ? analysis_depth : entry.depth;
+        MoveValidation validation = validateMove(reference,
+                                                 entry.position,
+                                                 entry.expected,
+                                                 depth,
+                                                 entry.fullmove,
+                                                 display_total,
+                                                 progress);
+        if (progress)
+            fmt::print("\r\033[K");
+        appendAnalysisEntry(report, analysis_failures, validation,
+                            entry, entry.expected, "", display_total);
+    }
 }
 
 SearchResult waitForBestmove(EngineProcess& engine,
@@ -1873,7 +1923,7 @@ int main(int argc, char* argv[]) {
             "\n"
             "Replay UCI log searches and compare engine output with logged moves.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
-            "At the end, analyze replay or log moves with a reference engine.\n"
+            "At the end, analyze replayed moves with a reference engine.\n"
             "Full reports are saved as <log>.<analysis-key>_<target>_analysis and reused.\n"
             "\n"
             "Options:\n"
@@ -1881,11 +1931,13 @@ int main(int argc, char* argv[]) {
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
             "  --ref-depth N       Reference analysis depth (default: 20; 0 follows logged depth)\n"
-            "  --analyse T         Analyze replay or log moves: replay, log (default: replay)\n"
+            "  --log               Analyze logged moves instead of replayed moves;\n"
+            "                      does not run the candidate engine\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
-            "  --time              Replay with the original logged go wtime/btime command\n"
+            "  --time              Replay with the original logged go wtime/btime command;\n"
+            "                      ignored with --log\n"
             "  --threads N         Send `setoption name Threads value N`\n"
             "  --force             Ignore existing analysis files and analyze again\n"
             "  --color             Color judgement output\n"
@@ -1906,12 +1958,8 @@ int main(int argc, char* argv[]) {
             reference_path = argv[++i];
         } else if (arg == "--ref-depth" && i + 1 < argc) {
             analysis_depth = std::max(0, std::stoi(argv[++i]));
-        } else if (arg == "--analyse" && i + 1 < argc) {
-            analysis_target = argv[++i];
-            if (analysis_target != "replay" && analysis_target != "log") {
-                fmt::print(stderr, "ERROR: --analyse must be replay or log\n");
-                return 1;
-            }
+        } else if (arg == "--log") {
+            analysis_target = "log";
         } else if (arg == "--no-analysis") {
             analyze = false;
         } else if (arg == "--move" && i + 1 < argc) {
@@ -1975,6 +2023,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (!analyze && analysis_target == "log") {
+        fmt::print(stderr, "ERROR: --log cannot be used with --no-analysis\n");
+        return 1;
+    }
+
     bool cache_enabled = analyze
                       && start_move == 0
                       && count < 0;
@@ -1987,8 +2040,7 @@ int main(int argc, char* argv[]) {
                       && std::getenv(kSuppressLogTimeWarning) == nullptr;
     if (warn_log_time) {
         fmt::print(stderr,
-                   "WARNING: --time affects candidate replay only; "
-                   "--analyse log analyzes fixed log moves.\n");
+                   "WARNING: --time is ignored with --log.\n");
         if (run_as_batch)
             setenv(kSuppressLogTimeWarning, "1", 1);
     }
@@ -2016,8 +2068,9 @@ int main(int argc, char* argv[]) {
         LogEntry final_log_entry = entries.back();
         std::string full_log_timeout_report = formatTimeoutReport(entries, final_log_entry.fullmove);
         std::string full_log_game_report = formatGameStatusReport(entries, full_log_timeout_report);
+        bool needs_candidate = !analyze || analysis_target != "log";
         if (cache_enabled) {
-            if (!executableExists(engine_path)) {
+            if (needs_candidate && !executableExists(engine_path)) {
                 fmt::print(stderr, "ERROR: Engine '{}' not found or not executable\n", engine_path);
                 return 1;
             }
@@ -2027,7 +2080,9 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
-            auto candidate_config = probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
+            EngineConfig candidate_config = analysis_target == "log"
+                ? EngineConfig{"unused", "none"}
+                : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
             auto reference_config = probeEngineConfig(reference_path, {});
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
                                        time_mode, analysis_depth, analysis_target);
@@ -2097,7 +2152,7 @@ int main(int argc, char* argv[]) {
 
         ReplayLineWidths line_widths = replayLineWidths(entries, display_total);
 
-        if (!executableExists(engine_path)) {
+        if (needs_candidate && !executableExists(engine_path)) {
             fmt::print(stderr, "ERROR: Engine '{}' not found or not executable\n", engine_path);
             return 1;
         }
@@ -2112,6 +2167,40 @@ int main(int argc, char* argv[]) {
 
             reference = std::make_unique<EngineProcess>(reference_path, verbose);
             initializeReference(*reference);
+        }
+
+        if (analyze && analysis_target == "log") {
+            bool progress = isatty(STDOUT_FILENO);
+            std::vector<AnalysisEntry> report;
+            int analysis_failures = 0;
+
+            analyzeLoggedMoves(*reference, entries, analysis_depth, display_total,
+                               progress, report, analysis_failures);
+
+            bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
+            std::string timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
+            std::string game_report = includes_final_log_entry ? full_log_game_report : "";
+            std::string analysis_report_body = formatAnalysisReport(report, analysis_failures,
+                                                                    false, true,
+                                                                    game_report, timeout_report);
+            std::string analysis_report = cache
+                ? cache->provenance + "\n" + analysis_report_body
+                : analysis_report_body;
+
+            if (cache_enabled) {
+                writeFile(report_path, analysis_report);
+                fmt::print("Analysis saved     : {}\n", report_path.string());
+            }
+
+            fmt::print("{}",
+                       formatDiagnosticsReport(entries, display_total,
+                                               color_output, verbose));
+            fmt::print("{}",
+                       displayAnalysisReport(analysis_report_body, color_output, verbose));
+            if (analysis_report_body.empty() || analysis_report_body.back() != '\n')
+                fmt::print("\n");
+
+            return reportTriggersFailure(analysis_report_body) ? 1 : 0;
         }
 
         auto make_engine = [&] {
@@ -2167,20 +2256,10 @@ int main(int argc, char* argv[]) {
                     fmt::print("\r\033[K");
 
                 reference_suffix = formatReferenceInline(validation, color_output);
-                if (!validation.ok) {
-                    analysis_failures++;
-                } else if (isReportableJudgement(validation.label)) {
-                    report.push_back({
-                        validation.label,
-                        analyzed_move,
-                        analysis_target == "replay" && mismatch ? entry.expected : "",
-                        validation.bestmove,
-                        entry.fen,
-                        entry.fullmove,
-                        display_total,
-                        validation.cp_loss
-                    });
-                }
+                appendAnalysisEntry(report, analysis_failures, validation,
+                                    entry, analyzed_move,
+                                    analysis_target == "replay" && mismatch ? entry.expected : "",
+                                    display_total);
             }
 
             std::string replay_display = mismatch

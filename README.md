@@ -78,11 +78,12 @@ final report. Explicit `--ref-nodes` and `--ref-depth` values are used exactly
 as supplied and skip that confirmation pass.
 `replay` exits nonzero when the report contains a blunder or timeout.
 The key hashes the log, sibling PGN when present, replay/analysis mode,
-reference UCI output, and content hashes for NNUE/file-valued reference options
-that exist locally. Reference engine path and binary content are ignored so
-Stockfish reports can be reused across machines with matching UCI identity and
-network settings. For replay analysis it also hashes the candidate binary
-content and UCI output plus the exact setoption stream sent by replay.
+candidate and reference UCI identity, and content hashes for NNUE/file-valued
+options that exist locally. Engine paths and binary content are ignored so
+reports can be reused across machines with matching UCI identity and network
+settings. Enyo identity uses the full `Enyo Release ...` version string but
+drops the `built ...` timestamp. For replay analysis it also hashes the exact
+setoption stream sent by replay.
 Reference analysis resets the reference engine before each best-move search and
 again before each played-move `searchmoves` search, so a full run and
 `--move N --count 1` judge the same FEN from the same reference state.

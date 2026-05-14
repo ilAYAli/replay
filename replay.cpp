@@ -1007,30 +1007,6 @@ std::filesystem::path expandPath(std::string value) {
     return path;
 }
 
-std::optional<std::filesystem::path> resolveExecutablePath(const std::string& engine_path) {
-    std::string resolved = engine_path;
-    if (engine_path.find('/') == std::string::npos) {
-        std::string command = "command -v " + shellQuote(engine_path);
-        FILE* pipe = popen(command.c_str(), "r");
-        if (pipe) {
-            char buffer[4096];
-            if (fgets(buffer, sizeof(buffer), pipe))
-                resolved = trim(buffer);
-            pclose(pipe);
-        }
-    }
-
-    auto path = expandPath(resolved);
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec))
-        return std::nullopt;
-
-    auto canonical = std::filesystem::weakly_canonical(path, ec);
-    if (!ec)
-        return canonical;
-    return path;
-}
-
 bool isFileOptionName(const std::string& name) {
     std::string option = lower(name);
     return option.find("nnue") != std::string::npos
@@ -1065,6 +1041,49 @@ std::optional<std::pair<std::string, std::string>> parseUciDefaultValue(const st
     return std::pair{name, trim(line.substr(default_pos + 9))};
 }
 
+std::optional<std::string> enyoVersionIdentity(const std::string& line) {
+    std::string marker = "Enyo Release ";
+    size_t start = line.find(marker);
+    if (start == std::string::npos)
+        return std::nullopt;
+
+    start += marker.size();
+    size_t end = line.find(" built ", start);
+    std::string version = trim(line.substr(start, end == std::string::npos ? end : end - start));
+    if (version.empty())
+        return std::nullopt;
+    return "id enyo-version " + version;
+}
+
+std::string cacheUciText(const std::string& uci_text) {
+    std::istringstream input(uci_text);
+    std::string output;
+    std::string line;
+    bool saw_enyo_version = false;
+    while (std::getline(input, line)) {
+        if (startsWith(line, "Using config file:"))
+            continue;
+
+        auto enyo_version = enyoVersionIdentity(line);
+        if (enyo_version) {
+            if (!saw_enyo_version)
+                output += *enyo_version + "\n";
+            saw_enyo_version = true;
+            continue;
+        }
+
+        auto option = parseUciDefaultValue(line);
+        if (option && isFileOptionName(option->first)) {
+            output += fmt::format("option name {} file-option\n", option->first);
+            continue;
+        }
+
+        output += line + "\n";
+    }
+
+    return output;
+}
+
 void addFileOptionDetail(std::string& details,
                          std::unordered_map<std::string, std::string>& file_hashes,
                          std::string& nnue2_hash,
@@ -1076,7 +1095,7 @@ void addFileOptionDetail(std::string& details,
     auto path = expandPath(value);
     std::error_code ec;
     std::string option = lower(name);
-    details += fmt::format("{}={}", name, path.string());
+    details += name;
     if (std::filesystem::is_regular_file(path, ec)) {
         std::string key = path.string();
         if (!file_hashes.contains(key))
@@ -1085,7 +1104,7 @@ void addFileOptionDetail(std::string& details,
         if (option.find("nnue2") != std::string::npos)
             nnue2_hash = file_hashes[key].substr(0, 8);
     } else {
-        details += " hash=missing";
+        details += fmt::format(" hash=missing value={}", path.filename().string());
         if (option.find("nnue2") != std::string::npos)
             nnue2_hash = "missing";
     }
@@ -1248,8 +1267,7 @@ void waitForToken(EngineProcess& engine, const std::string& token) {
 }
 
 EngineConfig probeEngineConfig(const std::string& engine_path,
-                               const std::vector<std::string>& setoptions,
-                               bool include_binary) {
+                               const std::vector<std::string>& setoptions) {
     EngineProcess engine(engine_path, false);
     engine.send("uci");
 
@@ -1271,15 +1289,10 @@ EngineConfig probeEngineConfig(const std::string& engine_path,
 
     std::string setoption_text = joinLines(setoptions);
     auto file_options = fileOptionDetails(uci_text, setoptions);
-    auto executable_path = resolveExecutablePath(engine_path);
-    std::string executable_text = executable_path ? executable_path->string() : engine_path;
-    std::string executable_hash = include_binary && executable_path ? hashFileContent(*executable_path, 16) : "ignored";
+    std::string identity_text = cacheUciText(uci_text);
     std::string config_hash = hashString(fmt::format(
-        "path={}\nresolved={}\nbinary={}\nuci={}\nsetoptions={}\nfiles={}\n",
-        include_binary ? engine_path : "ignored",
-        include_binary ? executable_text : "ignored",
-        executable_hash,
-        uci_text,
+        "uci={}\nsetoptions={}\nfiles={}\n",
+        identity_text,
         setoption_text,
         file_options.details));
 
@@ -1392,7 +1405,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                                    confirmationDisplay(confirm_reportable)));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v15\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v16\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
@@ -2485,8 +2498,8 @@ int main(int argc, char* argv[]) {
 
             EngineConfig candidate_config = analysis_target == "log"
                 ? EngineConfig{"unused", "none"}
-                : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads), true);
-            auto reference_config = probeEngineConfig(reference_path, {}, false);
+                : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
+            auto reference_config = probeEngineConfig(reference_path, {});
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
                                        time_mode, reference_limit, analysis_target,
                                        confirm_reportable);

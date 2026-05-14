@@ -461,14 +461,6 @@ ReplayLineWidths replayLineWidths(const std::vector<LogEntry>& entries, int disp
     return widths;
 }
 
-std::string appendMoveToPosition(const std::string& position, const std::string& move) {
-    if (move.empty() || move == "(none)")
-        return position;
-    if (position.find(" moves ") != std::string::npos)
-        return position + " " + move;
-    return position + " moves " + move;
-}
-
 std::string extractSearchFen(const std::string& line) {
     size_t start = line.find("fen=");
     if (start == std::string::npos)
@@ -1252,7 +1244,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                                    analysis_depth));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v8\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v9\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
@@ -1318,7 +1310,8 @@ ReferenceResult referenceSearch(EngineProcess& engine,
                                 const std::string& position,
                                 int depth,
                                 bool progress,
-                                const std::string& progress_text) {
+                                const std::string& progress_text,
+                                const std::string& search_move = "") {
     ReferenceResult result;
     int stm_sign = sideToMoveSign(position);
     int target_depth = std::max(1, depth);
@@ -1330,7 +1323,10 @@ ReferenceResult referenceSearch(EngineProcess& engine,
     }
 
     engine.send(position);
-    engine.send(fmt::format("go depth {}", target_depth));
+    if (search_move.empty())
+        engine.send(fmt::format("go depth {}", target_depth));
+    else
+        engine.send(fmt::format("go depth {} searchmoves {}", target_depth, search_move));
 
     while (true) {
         auto line = engine.readLine();
@@ -1390,11 +1386,12 @@ MoveValidation validateMove(EngineProcess& reference,
     }
 
     ReferenceResult played = referenceSearch(reference,
-                                            appendMoveToPosition(position, played_move),
+                                            position,
                                             depth,
                                             progress,
                                             fmt::format("analyzing [{}/{}] played-move",
-                                                        fullmove, display_total));
+                                                        fullmove, display_total),
+                                            played_move);
     if (!played.has_score) {
         validation.error = "reference returned no score";
         return validation;

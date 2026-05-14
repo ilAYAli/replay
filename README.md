@@ -10,9 +10,11 @@ with the logged moves.
 - `position ...` is sent exactly as logged.
 - Logged `setoption ...` lines are sent before replay starts.
 - Default candidate replay uses the last logged `info ... nodes N ...` before
-  `bestmove`, and sends `go nodes N`.
+  `bestmove`, and sends `go nodes min(N, 100000000)`.
 - If no node count was logged, replay falls back to the original logged `go`
   command.
+- `--max-replay-nodes N` changes the candidate replay node cap. Use `0` for
+  no cap.
 - `--time` always sends the original logged `go wtime/btime/...` command.
 - If replay chooses a move different from the log, the engine is restarted
   before the next position so stale state from the diverged line is not reused.
@@ -121,6 +123,12 @@ Use original logged time-control commands:
 
 ```sh
 replay --time "game.log"
+```
+
+Use the full logged node count without the default 100M cap:
+
+```sh
+replay --max-replay-nodes 0 "game.log"
 ```
 
 Skip per-move output:

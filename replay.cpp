@@ -49,6 +49,7 @@ constexpr const char* kReplayBatch = "REPLAY_BATCH";
 constexpr const char* kBatchProgressPrefix = "BATCH_PROGRESS: ";
 constexpr int kDefaultReferenceNodes = 1'000'000;
 constexpr int kConfirmReferenceNodes = 2'000'000;
+constexpr long long kDefaultMaxReplayNodes = 100'000'000;
 
 struct SearchResult {
     std::string bestmove;
@@ -302,6 +303,17 @@ std::string formatNodeCount(long long nodes) {
     if (nodes >= 1'000)
         return fmt::format("{:.1f}K", static_cast<double>(nodes) / 1'000.0);
     return fmt::format("{}", nodes);
+}
+
+std::string replayGoCommand(const std::string& logged_go,
+                            long long logged_nodes,
+                            long long max_replay_nodes) {
+    if (logged_nodes <= 0)
+        return logged_go;
+    long long nodes = max_replay_nodes > 0
+        ? std::min(logged_nodes, max_replay_nodes)
+        : logged_nodes;
+    return fmt::format("go nodes {}", nodes);
 }
 
 std::string formatSearchProgress(const std::string& go_command,
@@ -1463,6 +1475,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                  const EngineConfig& candidate,
                                  const EngineConfig& reference,
                                  bool time_mode,
+                                 long long max_replay_nodes,
                                  const ReferenceLimit& reference_limit,
                                  const std::string& analysis_target,
                                  bool confirm_reportable) {
@@ -1473,10 +1486,14 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
     std::string pgn_hash = std::filesystem::exists(pgn_path) ? hashFileContent(pgn_path) : "none";
     std::string input_hash = hashString(fmt::format("log={}\npgn={}\n", log_hash, pgn_hash));
     std::string mode = analysisModeName(time_mode, reference_limit, analysis_target);
-    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\nref-limit={}\nref-state=fresh\nconfirm={}\n",
-                                                   mode, time_mode, analysis_target,
-                                                   referenceLimitName(reference_limit),
-                                                   confirmationDisplay(confirm_reportable)));
+    std::string mode_text = fmt::format("mode={}\ntime={}\ntarget={}\n",
+                                        mode, time_mode, analysis_target);
+    if (analysis_target != "log" && !time_mode && max_replay_nodes != kDefaultMaxReplayNodes)
+        mode_text += fmt::format("replay-node-cap={}\n", max_replay_nodes);
+    mode_text += fmt::format("ref-limit={}\nref-state=fresh\nconfirm={}\n",
+                             referenceLimitName(reference_limit),
+                             confirmationDisplay(confirm_reportable));
+    std::string mode_hash = hashString(mode_text);
 
     std::string key = hashString(fmt::format(
         "replay-cache-v17\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
@@ -1492,8 +1509,11 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
         referenceLimitDisplay(reference_limit),
         confirmationDisplay(confirm_reportable),
         candidate.nnue2_hash);
-    if (analysis_target != "log" && !time_mode)
+    if (analysis_target != "log" && !time_mode) {
         provenance += " | candidate nodes";
+        if (max_replay_nodes != kDefaultMaxReplayNodes)
+            provenance += fmt::format(" max {}", max_replay_nodes);
+    }
 
     return {key, provenance};
 }
@@ -1837,7 +1857,8 @@ SearchResult waitForBestmove(EngineProcess& engine,
     throw std::runtime_error("engine stopped before bestmove");
 }
 
-ParsedLog readLog(const std::filesystem::path& logfile) {
+ParsedLog readLog(const std::filesystem::path& logfile,
+                  long long max_replay_nodes) {
     std::ifstream file(logfile);
     if (!file.is_open())
         throw std::runtime_error(fmt::format("failed to open logfile: {}", logfile.string()));
@@ -1871,9 +1892,8 @@ ParsedLog readLog(const std::filesystem::path& logfile) {
     auto finish_pending_move = [&](const std::string& move) {
         if (pending_depth <= 0)
             pending_depth = 1;
-        std::string replay_go = pending_nodes > 0
-            ? fmt::format("go nodes {}", pending_nodes)
-            : pending_go;
+        std::string replay_go = replayGoCommand(pending_go, pending_nodes,
+                                                max_replay_nodes);
         if (pending_fen.empty()) {
             auto board = boardFromPosition(pending_position);
             if (board)
@@ -2268,7 +2288,6 @@ std::string lastJobProgress(const std::filesystem::path& path) {
 void printBatchProgress(const std::vector<RunningJob>& running,
                         const std::vector<std::filesystem::path>& logs,
                         size_t completed) {
-    auto now = std::chrono::steady_clock::now();
     auto oldest = running.front();
     for (const auto& job : running) {
         if (job.started < oldest.started)
@@ -2418,6 +2437,7 @@ int main(int argc, char* argv[]) {
     int count = -1;
     int threads = -1;
     int jobs = 1;
+    long long max_replay_nodes = kDefaultMaxReplayNodes;
     ReferenceLimit reference_limit;
     std::string analysis_target = "replay";
     bool time_mode = false;
@@ -2454,6 +2474,8 @@ int main(int argc, char* argv[]) {
             "  --summary-only      Skip per-move output; print final summaries only\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
+            "  --max-replay-nodes N\n"
+            "                      Cap candidate replay nodes (default: 100000000, 0 disables)\n"
             "  --time              Replay with the original logged go wtime/btime command;\n"
             "                      ignored with --log and overrides logged-node replay\n"
             "  --threads N         Send `setoption name Threads value N`\n"
@@ -2494,6 +2516,8 @@ int main(int argc, char* argv[]) {
             start_move = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--count" && i + 1 < argc) {
             count = std::max(0, std::stoi(argv[++i]));
+        } else if (arg == "--max-replay-nodes" && i + 1 < argc) {
+            max_replay_nodes = std::max(0LL, std::stoll(argv[++i]));
         } else if (arg == "--threads" && i + 1 < argc) {
             threads = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--jobs" && i + 1 < argc) {
@@ -2589,7 +2613,7 @@ int main(int argc, char* argv[]) {
     try {
         std::filesystem::path logfile_path = logfile;
         std::filesystem::path report_path;
-        ParsedLog parsed = readLog(logfile);
+        ParsedLog parsed = readLog(logfile, max_replay_nodes);
         std::vector<LogEntry> entries = parsed.entries;
         trimPostGameEntriesFromSiblingPgn(entries, logfile_path);
         if (entries.empty()) {
@@ -2618,7 +2642,8 @@ int main(int argc, char* argv[]) {
                 : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
             auto reference_config = probeEngineConfig(reference_path, {});
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
-                                       time_mode, reference_limit, analysis_target,
+                                       time_mode, max_replay_nodes,
+                                       reference_limit, analysis_target,
                                        confirm_reportable);
             report_path = analysisPath(logfile_path, cache->key, analysis_target);
 

@@ -1059,18 +1059,14 @@ std::string cacheUciText(const std::string& uci_text) {
     std::istringstream input(uci_text);
     std::string output;
     std::string line;
-    bool saw_enyo_version = false;
+    std::optional<std::string> enyo_version;
     while (std::getline(input, line)) {
         if (startsWith(line, "Using config file:"))
             continue;
 
-        auto enyo_version = enyoVersionIdentity(line);
-        if (enyo_version) {
-            if (!saw_enyo_version)
-                output += *enyo_version + "\n";
-            saw_enyo_version = true;
-            continue;
-        }
+        auto version = enyoVersionIdentity(line);
+        if (version)
+            enyo_version = version;
 
         auto option = parseUciDefaultValue(line);
         if (option && isFileOptionName(option->first)) {
@@ -1080,6 +1076,9 @@ std::string cacheUciText(const std::string& uci_text) {
 
         output += line + "\n";
     }
+
+    if (enyo_version)
+        return *enyo_version + "\n";
 
     return output;
 }
@@ -1405,7 +1404,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                                    confirmationDisplay(confirm_reportable)));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v16\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v17\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(

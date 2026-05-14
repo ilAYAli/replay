@@ -1252,7 +1252,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                                    analysis_depth));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v7\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v8\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
@@ -1285,16 +1285,12 @@ void initializeEngine(EngineProcess& engine,
     waitForToken(engine, "readyok");
 }
 
-void resetReference(EngineProcess& engine) {
-    engine.send("ucinewgame");
-    engine.send("isready");
-    waitForToken(engine, "readyok");
-}
-
 void initializeReference(EngineProcess& engine) {
     engine.send("uci");
     waitForToken(engine, "uciok");
-    resetReference(engine);
+    engine.send("ucinewgame");
+    engine.send("isready");
+    waitForToken(engine, "readyok");
 }
 
 void updateReferenceScore(ReferenceResult& result, const std::string& line, int stm_sign) {
@@ -1333,7 +1329,6 @@ ReferenceResult referenceSearch(EngineProcess& engine,
         fflush(stdout);
     }
 
-    resetReference(engine);
     engine.send(position);
     engine.send(fmt::format("go depth {}", target_depth));
 

@@ -818,7 +818,37 @@ std::string stripFenFields(const std::string& report) {
 }
 
 std::string displayAnalysisReport(const std::string& report, bool color, bool include_fen) {
-    return colorizeAnalysisReport(include_fen ? report : stripFenFields(report), color);
+    std::string text = include_fen ? report : stripFenFields(report);
+    std::istringstream input(text);
+    std::string normalized;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (startsWith(line, "accuracy:") && line.find("avg loss:") != std::string::npos) {
+            int accuracy = -1;
+            int avg_loss = -1;
+            if (std::sscanf(line.c_str(), "accuracy: %d%% avg loss: %dcp",
+                            &accuracy, &avg_loss) == 2) {
+                normalized += fmt::format("{:<11} {}%\n", "Accuracy:", accuracy);
+                normalized += fmt::format("{:<11} {}cp\n", "Avg loss:", avg_loss);
+                continue;
+            }
+        } else if (startsWith(line, "accuracy:")) {
+            int accuracy = -1;
+            if (std::sscanf(line.c_str(), "accuracy: %d%%", &accuracy) == 1) {
+                normalized += fmt::format("{:<11} {}%\n", "Accuracy:", accuracy);
+                continue;
+            }
+        } else if (startsWith(line, "avg loss:")) {
+            int avg_loss = -1;
+            if (std::sscanf(line.c_str(), "avg loss: %dcp", &avg_loss) == 1) {
+                normalized += fmt::format("{:<11} {}cp\n", "Avg loss:", avg_loss);
+                continue;
+            }
+        }
+        normalized += line + "\n";
+    }
+
+    return colorizeAnalysisReport(normalized, color);
 }
 
 bool batchMode() {
@@ -854,8 +884,6 @@ void printBatchBlock(const std::string& text) {
 }
 
 void printSummaryReport(const std::string& report, bool color, bool include_fen) {
-    if (!batchMode())
-        fmt::print("=== Summary ===\n");
     printBatchBlock(displayAnalysisReport(report, color, include_fen));
 }
 
@@ -938,14 +966,17 @@ std::string replaceDerivedReportLines(const std::string& report,
                                       const std::string& timeout_report) {
     std::istringstream input(report);
     std::string output;
-    std::string accuracy_report;
+    std::string score_report;
     std::string line;
     while (std::getline(input, line)) {
         if ((!game_report.empty() || !timeout_report.empty())
          && line == "No inaccuracies, mistakes, or blunders.")
             continue;
-        if (startsWith(line, "accuracy:")) {
-            accuracy_report += line + "\n";
+        if (startsWith(line, "accuracy:")
+         || startsWith(line, "Accuracy:")
+         || startsWith(line, "avg loss:")
+         || startsWith(line, "Avg loss:")) {
+            score_report += line + "\n";
             continue;
         }
         if (startsWith(line, "game:"))
@@ -955,7 +986,7 @@ std::string replaceDerivedReportLines(const std::string& report,
     }
 
     output += timeout_report;
-    output += accuracy_report;
+    output += score_report;
     output += game_report;
     if (output.empty())
         output = "No inaccuracies, mistakes, or blunders.\n";
@@ -968,7 +999,9 @@ std::string formatAccuracyReport(const AnalysisStats& stats) {
 
     int accuracy = std::clamp(static_cast<int>(std::lround(stats.accuracy / stats.moves)), 0, 100);
     int avg_loss = static_cast<int>(std::lround(static_cast<double>(stats.cp_loss) / stats.moves));
-    return fmt::format("{:<11} {}%  avg loss: {}cp\n", "accuracy:", accuracy, avg_loss);
+    return fmt::format("{:<11} {}%\n{:<11} {}cp\n",
+                       "Accuracy:", accuracy,
+                       "Avg loss:", avg_loss);
 }
 
 std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,

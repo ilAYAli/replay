@@ -724,6 +724,35 @@ std::string displayAnalysisReport(const std::string& report, bool color, bool in
     return colorizeAnalysisReport(include_fen ? report : stripFenFields(report), color);
 }
 
+bool batchMode() {
+    return std::getenv(kReplayBatch) != nullptr;
+}
+
+std::string batchIndent(const std::string& text) {
+    if (!batchMode())
+        return text;
+
+    std::string output;
+    bool line_start = true;
+    for (char ch : text) {
+        if (line_start && ch != '\n')
+            output += "  ";
+        output += ch;
+        line_start = ch == '\n';
+    }
+    return output;
+}
+
+void printBatchBlock(const std::string& text) {
+    fmt::print("{}", batchIndent(text));
+}
+
+void printSummaryReport(const std::string& report, bool color, bool include_fen) {
+    if (!batchMode())
+        fmt::print("=== Summary ===\n");
+    printBatchBlock(displayAnalysisReport(report, color, include_fen));
+}
+
 std::string formatDiagnosticsReport(const std::vector<LogEntry>& entries,
                                     int display_total,
                                     bool color,
@@ -788,13 +817,13 @@ void printLogMoveLine(const LogEntry& entry,
                       bool include_fen) {
     std::string played_display = formatMoveWithAlgebra(entry.position, entry.expected);
     std::string reference_suffix = formatReferenceInline(validation, color);
-    fmt::print("[{:>{}}/{}] {:<{}} :: {}\n",
-               entry.fullmove, widths.fullmove, display_total,
-               played_display, widths.replay,
-               reference_suffix);
+    printBatchBlock(fmt::format("[{:>{}}/{}] {:<{}} :: {}\n",
+                                entry.fullmove, widths.fullmove, display_total,
+                                played_display, widths.replay,
+                                reference_suffix));
     for (const auto& diagnostic : entry.diagnostics)
-        fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
-                                                color, include_fen));
+        printBatchBlock(formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                             color, include_fen) + "\n");
     fflush(stdout);
 }
 
@@ -2176,7 +2205,7 @@ int main(int argc, char* argv[]) {
             report_path = analysisPath(logfile_path, cache->key, analysis_target);
 
             if (!force && std::filesystem::exists(report_path)) {
-                bool batch_mode = std::getenv(kReplayBatch) != nullptr;
+                bool batch_mode = batchMode();
                 std::string cached_report = readFile(report_path);
                 std::string cached_body = cached_report;
                 std::string cached_provenance;
@@ -2199,11 +2228,9 @@ int main(int argc, char* argv[]) {
                         fmt::print("cached: {}\n", report_path.string());
                     if (verbose)
                         fmt::print("{}\n", cache->provenance);
-                    fmt::print("{}",
-                               formatDiagnosticsReport(entries, final_log_entry.fullmove,
-                                                       color_output, verbose));
-                    fmt::print("=== Summary ===\n{}",
-                               displayAnalysisReport(cached_body, color_output, verbose));
+                    printBatchBlock(formatDiagnosticsReport(entries, final_log_entry.fullmove,
+                                                            color_output, verbose));
+                    printSummaryReport(cached_body, color_output, verbose);
                     if (cached_body.empty() || cached_body.back() != '\n')
                         fmt::print("\n");
                     return reportTriggersFailure(cached_body) ? 1 : 0;
@@ -2214,7 +2241,8 @@ int main(int argc, char* argv[]) {
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
         if (print_move_output)
-            fmt::print("Extracted {} go commands and {} logged moves\n", total_entries, total_entries);
+            printBatchBlock(fmt::format("Extracted {} go commands and {} logged moves\n",
+                                        total_entries, total_entries));
         if (verbose && cache)
             fmt::print("{}\n", cache->provenance);
 
@@ -2230,15 +2258,15 @@ int main(int argc, char* argv[]) {
             int skipped = (int)std::distance(entries.begin(), first);
             entries.erase(entries.begin(), first);
             if (print_move_output) {
-                fmt::print("Starting at fullmove {}; skipped {} log entries; {} remaining\n",
-                           entries.front().fullmove, skipped, entries.size());
+                printBatchBlock(fmt::format("Starting at fullmove {}; skipped {} log entries; {} remaining\n",
+                                            entries.front().fullmove, skipped, entries.size()));
             }
         }
 
         if (count >= 0 && (int)entries.size() > count) {
             entries.erase(entries.begin() + count, entries.end());
             if (print_move_output)
-                fmt::print("Limiting to {} moves\n", count);
+                printBatchBlock(fmt::format("Limiting to {} moves\n", count));
         }
 
         ReplayLineWidths line_widths = replayLineWidths(entries, display_total);
@@ -2283,16 +2311,14 @@ int main(int argc, char* argv[]) {
                 if (print_move_output)
                     fmt::print("\n");
                 writeFile(report_path, analysis_report);
-                fmt::print("Analysis saved     : {}\n", report_path.string());
+                printBatchBlock(fmt::format("Analysis saved     : {}\n", report_path.string()));
             }
 
             if (!print_move_output) {
-                fmt::print("{}",
-                           formatDiagnosticsReport(entries, display_total,
-                                                   color_output, verbose));
+                printBatchBlock(formatDiagnosticsReport(entries, display_total,
+                                                        color_output, verbose));
             }
-            fmt::print("=== Summary ===\n{}",
-                       displayAnalysisReport(analysis_report_body, color_output, verbose));
+            printSummaryReport(analysis_report_body, color_output, verbose);
             if (analysis_report_body.empty() || analysis_report_body.back() != '\n')
                 fmt::print("\n");
 
@@ -2362,16 +2388,16 @@ int main(int argc, char* argv[]) {
                 ? fmt::format("{} != log {}", played_display, expected_display)
                 : played_display;
             if (print_move_output) {
-                fmt::print("[{:>{}}/{}] {:<{}} | WDL {:+.2f} :: {}\n",
-                           entry.fullmove, line_widths.fullmove, display_total,
-                           replay_display, line_widths.replay,
-                           result.wdl, reference_suffix);
+                printBatchBlock(fmt::format("[{:>{}}/{}] {:<{}} | WDL {:+.2f} :: {}\n",
+                                            entry.fullmove, line_widths.fullmove, display_total,
+                                            replay_display, line_widths.replay,
+                                            result.wdl, reference_suffix));
                 for (const auto& diagnostic : entry.diagnostics)
-                    fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
-                                                            color_output, verbose));
+                    printBatchBlock(formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                                        color_output, verbose) + "\n");
                 for (const auto& diagnostic : result.diagnostics)
-                    fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
-                                                            color_output, verbose));
+                    printBatchBlock(formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                                        color_output, verbose) + "\n");
                 fflush(stdout);
             }
 
@@ -2396,23 +2422,24 @@ int main(int argc, char* argv[]) {
             if (cache_enabled) {
                 fmt::print("\n");
                 writeFile(report_path, analysis_report);
-                fmt::print("Analysis saved     : {}\n", report_path.string());
+                printBatchBlock(fmt::format("Analysis saved     : {}\n", report_path.string()));
                 printed_analysis_save = true;
             }
         }
 
-        fmt::print("{}=== Replay ===\n",
-                   printed_analysis_save || !print_move_output ? "" : "\n");
-        fmt::print("Positions replayed : {}\n", searched);
-        fmt::print("Bestmove matches   : {}/{} ({} differed)\n",
-                   searched - mismatches, searched, mismatches);
-        fmt::print("Final WDL          : {:+.2f}\n", final_wdl);
-        fmt::print("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl);
+        printBatchBlock(fmt::format("{}=== Replay ===\n",
+                                    printed_analysis_save || !print_move_output ? "" : "\n"));
+        printBatchBlock(fmt::format("Positions replayed : {}\n", searched));
+        printBatchBlock(fmt::format("Bestmove matches   : {}/{} ({} differed)\n",
+                                    searched - mismatches, searched, mismatches));
+        printBatchBlock(fmt::format("Final WDL          : {:+.2f}\n", final_wdl));
+        printBatchBlock(fmt::format("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl));
 
         if (analyze) {
-            fmt::print("\n=== Summary ===\n{}",
-                       formatAnalysisReport(report, analysis_failures, color_output, verbose,
-                                            game_report, timeout_report));
+            fmt::print("\n");
+            printSummaryReport(formatAnalysisReport(report, analysis_failures, color_output, verbose,
+                                                    game_report, timeout_report),
+                               color_output, verbose);
         }
 
         return reportTriggersFailure(analysis_report_body) ? 1 : 0;

@@ -769,6 +769,24 @@ bool sameLogEntry(const LogEntry& lhs, const LogEntry& rhs) {
         && lhs.expected == rhs.expected;
 }
 
+void printLogMoveLine(const LogEntry& entry,
+                      int display_total,
+                      const ReplayLineWidths& widths,
+                      const MoveValidation& validation,
+                      bool color,
+                      bool include_fen) {
+    std::string played_display = formatMoveWithAlgebra(entry.position, entry.expected);
+    std::string reference_suffix = formatReferenceInline(validation, color);
+    fmt::print("[{:>{}}/{}] {:<{}} :: {}\n",
+               entry.fullmove, widths.fullmove, display_total,
+               played_display, widths.replay,
+               reference_suffix);
+    for (const auto& diagnostic : entry.diagnostics)
+        fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                                color, include_fen));
+    fflush(stdout);
+}
+
 std::string replaceDerivedReportLines(const std::string& report,
                                       const std::string& game_report,
                                       const std::string& timeout_report) {
@@ -1436,7 +1454,11 @@ void analyzeLoggedMoves(EngineProcess& reference,
                         const std::vector<LogEntry>& entries,
                         int analysis_depth,
                         int display_total,
+                        const ReplayLineWidths& line_widths,
                         bool progress,
+                        bool print_move_output,
+                        bool color,
+                        bool include_fen,
                         std::vector<AnalysisEntry>& report,
                         int& analysis_failures) {
     for (const auto& entry : entries) {
@@ -1450,6 +1472,9 @@ void analyzeLoggedMoves(EngineProcess& reference,
                                                  progress);
         if (progress)
             fmt::print("\r\033[K");
+        if (print_move_output)
+            printLogMoveLine(entry, display_total, line_widths,
+                             validation, color, include_fen);
         appendAnalysisEntry(report, analysis_failures, validation,
                             entry, entry.expected, "", display_total);
     }
@@ -1904,6 +1929,7 @@ int main(int argc, char* argv[]) {
     bool verbose = false;
     bool color_output = false;
     bool force = false;
+    bool print_move_output = true;
     bool engine_path_explicit = false;
     std::vector<std::pair<int, std::string>> positional_args;
 
@@ -1925,6 +1951,7 @@ int main(int argc, char* argv[]) {
             "  --log               Analyze logged moves instead of replayed moves;\n"
             "                      does not run the candidate engine\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
+            "  --summary-only      Skip per-move output; print final summaries only\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
             "  --time              Replay with the original logged go wtime/btime command;\n"
@@ -1953,6 +1980,8 @@ int main(int argc, char* argv[]) {
             analysis_target = "log";
         } else if (arg == "--no-analysis") {
             analyze = false;
+        } else if (arg == "--summary-only") {
+            print_move_output = false;
         } else if (arg == "--move" && i + 1 < argc) {
             start_move = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--count" && i + 1 < argc) {
@@ -2079,7 +2108,8 @@ int main(int argc, char* argv[]) {
                                        time_mode, analysis_depth, analysis_target);
             report_path = analysisPath(logfile_path, cache->key, analysis_target);
 
-            if (!force && std::filesystem::exists(report_path)) {
+            if (!force && std::filesystem::exists(report_path)
+             && (analysis_target != "log" || !print_move_output)) {
                 bool batch_mode = std::getenv(kReplayBatch) != nullptr;
                 std::string cached_report = readFile(report_path);
                 std::string cached_body = cached_report;
@@ -2107,7 +2137,7 @@ int main(int argc, char* argv[]) {
                 fmt::print("{}",
                            formatDiagnosticsReport(entries, final_log_entry.fullmove,
                                                    color_output, verbose));
-                fmt::print("{}",
+                fmt::print("=== Summary ===\n{}",
                            displayAnalysisReport(cached_body, color_output, verbose));
                 if (cached_body.empty() || cached_body.back() != '\n')
                     fmt::print("\n");
@@ -2117,7 +2147,8 @@ int main(int argc, char* argv[]) {
 
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
-        fmt::print("Extracted {} go commands and {} logged moves\n", total_entries, total_entries);
+        if (print_move_output)
+            fmt::print("Extracted {} go commands and {} logged moves\n", total_entries, total_entries);
         if (verbose && cache)
             fmt::print("{}\n", cache->provenance);
 
@@ -2132,13 +2163,16 @@ int main(int argc, char* argv[]) {
             }
             int skipped = (int)std::distance(entries.begin(), first);
             entries.erase(entries.begin(), first);
-            fmt::print("Starting at fullmove {}; skipped {} log entries; {} remaining\n",
-                       entries.front().fullmove, skipped, entries.size());
+            if (print_move_output) {
+                fmt::print("Starting at fullmove {}; skipped {} log entries; {} remaining\n",
+                           entries.front().fullmove, skipped, entries.size());
+            }
         }
 
         if (count >= 0 && (int)entries.size() > count) {
             entries.erase(entries.begin() + count, entries.end());
-            fmt::print("Limiting to {} moves\n", count);
+            if (print_move_output)
+                fmt::print("Limiting to {} moves\n", count);
         }
 
         ReplayLineWidths line_widths = replayLineWidths(entries, display_total);
@@ -2166,7 +2200,8 @@ int main(int argc, char* argv[]) {
             int analysis_failures = 0;
 
             analyzeLoggedMoves(*reference, entries, analysis_depth, display_total,
-                               progress, report, analysis_failures);
+                               line_widths, progress, print_move_output,
+                               color_output, verbose, report, analysis_failures);
 
             bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
             std::string timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
@@ -2179,14 +2214,18 @@ int main(int argc, char* argv[]) {
                 : analysis_report_body;
 
             if (cache_enabled) {
+                if (print_move_output)
+                    fmt::print("\n");
                 writeFile(report_path, analysis_report);
                 fmt::print("Analysis saved     : {}\n", report_path.string());
             }
 
-            fmt::print("{}",
-                       formatDiagnosticsReport(entries, display_total,
-                                               color_output, verbose));
-            fmt::print("{}",
+            if (!print_move_output) {
+                fmt::print("{}",
+                           formatDiagnosticsReport(entries, display_total,
+                                                   color_output, verbose));
+            }
+            fmt::print("=== Summary ===\n{}",
                        displayAnalysisReport(analysis_report_body, color_output, verbose));
             if (analysis_report_body.empty() || analysis_report_body.back() != '\n')
                 fmt::print("\n");
@@ -2256,17 +2295,19 @@ int main(int argc, char* argv[]) {
             std::string replay_display = mismatch
                 ? fmt::format("{} != log {}", played_display, expected_display)
                 : played_display;
-            fmt::print("[{:>{}}/{}] {:<{}} | WDL {:+.2f} :: {}\n",
-                       entry.fullmove, line_widths.fullmove, display_total,
-                       replay_display, line_widths.replay,
-                       result.wdl, reference_suffix);
-            for (const auto& diagnostic : entry.diagnostics)
-                fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
-                                                        color_output, verbose));
-            for (const auto& diagnostic : result.diagnostics)
-                fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
-                                                        color_output, verbose));
-            fflush(stdout);
+            if (print_move_output) {
+                fmt::print("[{:>{}}/{}] {:<{}} | WDL {:+.2f} :: {}\n",
+                           entry.fullmove, line_widths.fullmove, display_total,
+                           replay_display, line_widths.replay,
+                           result.wdl, reference_suffix);
+                for (const auto& diagnostic : entry.diagnostics)
+                    fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                                            color_output, verbose));
+                for (const auto& diagnostic : result.diagnostics)
+                    fmt::print("{}\n", formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
+                                                            color_output, verbose));
+                fflush(stdout);
+            }
 
             if (mismatch)
                 engine.reset();
@@ -2294,7 +2335,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        fmt::print("{}=== Summary ===\n", printed_analysis_save ? "" : "\n");
+        fmt::print("{}=== Replay ===\n",
+                   printed_analysis_save || !print_move_output ? "" : "\n");
         fmt::print("Positions replayed : {}\n", searched);
         fmt::print("Bestmove matches   : {}/{} ({} differed)\n",
                    searched - mismatches, searched, mismatches);
@@ -2302,7 +2344,7 @@ int main(int argc, char* argv[]) {
         fmt::print("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl);
 
         if (analyze) {
-            fmt::print("\n=== Analysis ===\n{}",
+            fmt::print("\n=== Summary ===\n{}",
                        formatAnalysisReport(report, analysis_failures, color_output, verbose,
                                             game_report, timeout_report));
         }

@@ -119,6 +119,12 @@ Analyze the fixed logged moves without running the candidate engine:
 replay --log "game.log"
 ```
 
+Suppress individual move lines and print only the final summaries:
+
+```sh
+replay --log --summary-only "game.log"
+```
+
 With `--log`, `--time` is ignored and replay prints a warning.
 `--log` cannot be combined with `--no-analysis`.
 

@@ -99,6 +99,13 @@ Replay several matching logs; non-`.log` matches are ignored:
 replay *_oot*
 ```
 
+Run several logs in parallel. Output is captured per log and printed as
+complete filename blocks, so lines do not interleave:
+
+```sh
+replay --jobs 4 ~/code/cpp/chess/enyo/bugs
+```
+
 Pressing `Ctrl+C` during a batch run stops the whole batch.
 
 Start at a fullmove number and replay one logged engine move:

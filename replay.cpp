@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -902,6 +903,11 @@ std::string shellQuote(const std::string& value) {
     }
     quoted += "'";
     return quoted;
+}
+
+std::filesystem::path tempOutputPath(size_t index) {
+    auto directory = std::filesystem::temp_directory_path();
+    return directory / fmt::format("replay-job-{}-{}.out", getpid(), index);
 }
 
 void hashAppend(uint64_t& hash, std::string_view data) {
@@ -1962,41 +1968,177 @@ bool interruptedStatus(int status) {
     return false;
 }
 
+std::string batchCommand(char* argv[],
+                         int argc,
+                         const std::vector<int>& logfile_arg_indices,
+                         const std::filesystem::path& log,
+                         const std::filesystem::path& output_path) {
+    std::string command = shellQuote(argv[0]);
+    bool inserted_log = false;
+    for (int arg = 1; arg < argc; ++arg) {
+        if (std::string(argv[arg]) == "--jobs" && arg + 1 < argc) {
+            arg++;
+            continue;
+        }
+
+        if (containsArgIndex(logfile_arg_indices, arg)) {
+            if (!inserted_log) {
+                command += " " + shellQuote(log.string());
+                inserted_log = true;
+            }
+        } else {
+            command += " " + shellQuote(argv[arg]);
+        }
+    }
+    if (!inserted_log)
+        command += " " + shellQuote(log.string());
+
+    command += " > " + shellQuote(output_path.string()) + " 2>&1";
+    return command;
+}
+
+struct RunningJob {
+    pid_t pid = -1;
+    size_t index = 0;
+    std::filesystem::path output_path;
+};
+
+pid_t startBatchJob(const std::string& command) {
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", command.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    return pid;
+}
+
+void terminateJobs(const std::vector<RunningJob>& running) {
+    for (const auto& job : running)
+        kill(job.pid, SIGTERM);
+    for (const auto& job : running)
+        waitpid(job.pid, nullptr, 0);
+}
+
+void printJobOutput(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file.is_open())
+        return;
+
+    std::string line;
+    while (std::getline(file, line))
+        fmt::print("{}\n", line);
+}
+
 int runLogs(const std::vector<std::filesystem::path>& logs,
             int argc,
             char* argv[],
-            const std::vector<int>& logfile_arg_indices) {
+            const std::vector<int>& logfile_arg_indices,
+            int jobs) {
     if (logs.empty()) {
         fmt::print(stderr, "ERROR: No .log files found\n");
+        return 1;
+    }
+    if (jobs > 1 && logs.size() < 2) {
+        fmt::print(stderr, "ERROR: --jobs requires more than one .log file\n");
         return 1;
     }
 
     int failures = 0;
     setenv(kReplayBatch, "1", 1);
-    for (size_t i = 0; i < logs.size(); ++i) {
-        fmt::print("\n[{}/{}] {}\n", i + 1, logs.size(), logs[i].filename().string());
-        std::fflush(stdout);
+    if (jobs <= 1) {
+        for (size_t i = 0; i < logs.size(); ++i) {
+            fmt::print("\n[{}/{}] {}\n", i + 1, logs.size(), logs[i].filename().string());
+            std::fflush(stdout);
 
-        std::string command = shellQuote(argv[0]);
-        bool inserted_log = false;
-        for (int arg = 1; arg < argc; ++arg) {
-            if (containsArgIndex(logfile_arg_indices, arg)) {
-                if (!inserted_log) {
-                    command += " " + shellQuote(logs[i].string());
-                    inserted_log = true;
-                }
-            } else {
-                command += " " + shellQuote(argv[arg]);
-            }
+            auto output_path = tempOutputPath(i);
+            std::string command = batchCommand(argv, argc, logfile_arg_indices,
+                                               logs[i], output_path);
+            int rc = std::system(command.c_str());
+            printJobOutput(output_path);
+            std::filesystem::remove(output_path);
+            if (interruptedStatus(rc))
+                return 128 + SIGINT;
+            if (rc != 0)
+                failures++;
         }
-        if (!inserted_log)
-            command += " " + shellQuote(logs[i].string());
+        return failures == 0 ? 0 : 1;
+    }
 
-        int rc = std::system(command.c_str());
-        if (interruptedStatus(rc))
+    std::vector<RunningJob> running;
+    std::vector<std::optional<int>> completed(logs.size());
+    std::vector<std::filesystem::path> output_paths(logs.size());
+    size_t next = 0;
+    size_t next_print = 0;
+    auto launch_next = [&] {
+        auto output_path = tempOutputPath(next);
+        std::string command = batchCommand(argv, argc, logfile_arg_indices,
+                                           logs[next], output_path);
+        pid_t pid = startBatchJob(command);
+        if (pid < 0)
+            throw std::runtime_error(fmt::format("failed to start job: {}", strerror(errno)));
+        output_paths[next] = output_path;
+        running.push_back({pid, next, output_path});
+        next++;
+    };
+    auto print_completed = [&] {
+        while (next_print < logs.size() && completed[next_print]) {
+            fmt::print("\n[{}/{}] {}\n",
+                       next_print + 1, logs.size(), logs[next_print].filename().string());
+            printJobOutput(output_paths[next_print]);
+            std::filesystem::remove(output_paths[next_print]);
+
+            int status = *completed[next_print];
+            if (interruptedStatus(status)) {
+                terminateJobs(running);
+                return false;
+            }
+            if (status != 0)
+                failures++;
+            next_print++;
+        }
+        return true;
+    };
+
+    try {
+        while (next < logs.size() && running.size() < (size_t)jobs)
+            launch_next();
+
+        while (!running.empty()) {
+            int status = 0;
+            pid_t done = waitpid(-1, &status, 0);
+            if (done < 0) {
+                if (errno == EINTR) {
+                    terminateJobs(running);
+                    return 128 + SIGINT;
+                }
+                throw std::runtime_error(fmt::format("waitpid failed: {}", strerror(errno)));
+            }
+
+            auto job = std::find_if(running.begin(), running.end(),
+                [&](const RunningJob& candidate) {
+                    return candidate.pid == done;
+                });
+            if (job == running.end())
+                continue;
+
+            completed[job->index] = status;
+            running.erase(job);
+            if (next < logs.size())
+                launch_next();
+            if (!print_completed())
+                return 128 + SIGINT;
+        }
+        if (!print_completed())
             return 128 + SIGINT;
-        if (rc != 0)
-            failures++;
+    } catch (...) {
+        terminateJobs(running);
+        for (const auto& output_path : output_paths) {
+            if (!output_path.empty())
+                std::filesystem::remove(output_path);
+        }
+        throw;
     }
 
     return failures == 0 ? 0 : 1;
@@ -2012,6 +2154,7 @@ int main(int argc, char* argv[]) {
     int start_move = 0;
     int count = -1;
     int threads = -1;
+    int jobs = 1;
     ReferenceLimit reference_limit;
     std::string analysis_target = "replay";
     bool time_mode = false;
@@ -2048,6 +2191,7 @@ int main(int argc, char* argv[]) {
             "  --time              Replay with the original logged go wtime/btime command;\n"
             "                      ignored with --log\n"
             "  --threads N         Send `setoption name Threads value N`\n"
+            "  --jobs N            Run up to N logs in parallel in batch mode (default: 1)\n"
             "  --force             Ignore existing analysis files and analyze again\n"
             "  --color             Color judgement output\n"
             "  --verbose, -v       Print full UCI traffic, cache hashes, and FENs\n"
@@ -2084,6 +2228,8 @@ int main(int argc, char* argv[]) {
             count = std::max(0, std::stoi(argv[++i]));
         } else if (arg == "--threads" && i + 1 < argc) {
             threads = std::max(1, std::stoi(argv[++i]));
+        } else if (arg == "--jobs" && i + 1 < argc) {
+            jobs = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--time") {
             time_mode = true;
         } else if (arg == "--force") {
@@ -2150,6 +2296,11 @@ int main(int argc, char* argv[]) {
 
     bool logfile_is_directory = !batch_input && std::filesystem::is_directory(logfile);
     bool run_as_batch = batch_input || logfile_is_directory;
+    if (!run_as_batch && jobs > 1) {
+        fmt::print(stderr, "ERROR: --jobs requires multiple log inputs or a directory\n");
+        return 1;
+    }
+
     bool warn_log_time = analyze
                       && time_mode
                       && analysis_target == "log"
@@ -2162,7 +2313,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (run_as_batch)
-        return runLogs(collectLogTargets(logfile_targets), argc, argv, logfile_arg_indices);
+        return runLogs(collectLogTargets(logfile_targets), argc, argv, logfile_arg_indices, jobs);
 
     if (std::filesystem::path(logfile).extension() == ".pgn") {
         fmt::print(stderr, "ERROR: replay needs an Enyo .log file.\n");

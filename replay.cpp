@@ -2175,8 +2175,7 @@ int main(int argc, char* argv[]) {
                                        time_mode, reference_limit, analysis_target);
             report_path = analysisPath(logfile_path, cache->key, analysis_target);
 
-            if (!force && std::filesystem::exists(report_path)
-             && (analysis_target != "log" || !print_move_output)) {
+            if (!force && std::filesystem::exists(report_path)) {
                 bool batch_mode = std::getenv(kReplayBatch) != nullptr;
                 std::string cached_report = readFile(report_path);
                 std::string cached_body = cached_report;

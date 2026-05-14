@@ -68,9 +68,8 @@ full UCI traffic, cache hashes, and FENs.
 Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 
-The end report is saved beside the log as `game.<analysis-key>_<target>_analysis`,
-for example `game.91c8a4d2_rpl_analysis` or
-`game.91c8a4d2_log_analysis`.
+Replay analysis is saved beside the log as `game.<analysis-key>_rpl_analysis`.
+Log analysis from `--log` is saved as `game.analysis`.
 `replay` exits nonzero when the report contains a blunder or timeout.
 The key hashes the log, sibling PGN when present, replay/analysis mode,
 reference binary content and UCI output, and content hashes for NNUE/file-valued

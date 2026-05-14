@@ -1195,17 +1195,15 @@ std::string analysisModeName(bool time_mode, int analysis_depth, const std::stri
     return fmt::format("{}_depth{}", mode, analysis_depth);
 }
 
-std::string analysisTargetSuffix(const std::string& analysis_target) {
-    return analysis_target == "log" ? "log" : "rpl";
-}
-
 std::filesystem::path analysisPath(const std::filesystem::path& logfile,
                                    const std::string& analysis_key,
                                    const std::string& analysis_target) {
-    return logfile.parent_path() / fmt::format("{}.{}_{}_analysis",
+    if (analysis_target == "log")
+        return logfile.parent_path() / fmt::format("{}.analysis", logfile.stem().string());
+
+    return logfile.parent_path() / fmt::format("{}.{}_rpl_analysis",
                                                logfile.stem().string(),
-                                               analysis_key,
-                                               analysisTargetSuffix(analysis_target));
+                                               analysis_key);
 }
 
 std::string readFile(const std::filesystem::path& path) {
@@ -1916,7 +1914,8 @@ int main(int argc, char* argv[]) {
             "Replay UCI log searches and compare engine output with logged moves.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
             "At the end, analyze replayed moves with a reference engine.\n"
-            "Full reports are saved as <log>.<analysis-key>_<target>_analysis and reused.\n"
+            "Replay reports are saved as <log>.<analysis-key>_rpl_analysis.\n"
+            "Log reports are saved as <log>.analysis.\n"
             "\n"
             "Options:\n"
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"

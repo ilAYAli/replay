@@ -1332,16 +1332,16 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
     std::string pgn_hash = std::filesystem::exists(pgn_path) ? hashFileContent(pgn_path) : "none";
     std::string input_hash = hashString(fmt::format("log={}\npgn={}\n", log_hash, pgn_hash));
     std::string mode = analysisModeName(time_mode, reference_limit, analysis_target);
-    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\nref-limit={}\n",
+    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\nref-limit={}\nref-state=fresh\n",
                                                    mode, time_mode, analysis_target,
                                                    referenceLimitName(reference_limit)));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v10\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v12\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
-        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | {} | nnue2 {}",
+        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | {} | ref-state fresh | nnue2 {}",
         key,
         candidate.hash,
         reference.hash,
@@ -1373,6 +1373,9 @@ void initializeEngine(EngineProcess& engine,
 void initializeReference(EngineProcess& engine) {
     engine.send("uci");
     waitForToken(engine, "uciok");
+}
+
+void resetReference(EngineProcess& engine) {
     engine.send("ucinewgame");
     engine.send("isready");
     waitForToken(engine, "readyok");
@@ -1380,6 +1383,8 @@ void initializeReference(EngineProcess& engine) {
 
 void updateReferenceScore(ReferenceResult& result, const std::string& line, int stm_sign) {
     if (line.find("info depth ") == std::string::npos)
+        return;
+    if (line.find(" upperbound ") != std::string::npos || line.find(" lowerbound ") != std::string::npos)
         return;
 
     size_t mate_pos = line.find("score mate ");
@@ -1410,6 +1415,8 @@ ReferenceResult referenceSearch(EngineProcess& engine,
     int target = std::max(1, limit.value);
     int last_reported_depth = -1;
     int last_reported_nodes = -1;
+
+    resetReference(engine);
 
     if (progress) {
         if (limit.kind == ReferenceLimitKind::Nodes)

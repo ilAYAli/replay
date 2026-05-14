@@ -1,11 +1,170 @@
 # replay
 
-Replay UCI log searches and compare the current engine output with the
-logged moves.
+Replay UCI engine logs and compare the candidate engine's current move choices
+with the logged moves.
 
-`replay` is for reproducing logged engine behavior. It can also report whether
-the candidate engine's replay or log moves are inaccuracies, mistakes, or
-blunders according to a reference engine.
+## Replay Model
+
+`replay` tries to mimic the original game search from the log:
+
+- `position ...` is sent exactly as logged.
+- Logged `setoption ...` lines are sent before replay starts.
+- Default candidate replay uses the last logged `info ... nodes N ...` before
+  `bestmove`, and sends `go nodes N`.
+- If no node count was logged, replay falls back to the original logged `go`
+  command.
+- `--time` always sends the original logged `go wtime/btime/...` command.
+- If replay chooses a move different from the log, the engine is restarted
+  before the next position so stale state from the diverged line is not reused.
+
+This is not a perfect reconstruction of the original TT/history state, but it
+keeps the replay bounded by the logged search effort and avoids cold
+`go depth N` searches that can be much slower than the real game.
+
+## Analysis
+
+By default replay also asks a reference engine, `stockfish`, to judge each
+candidate move and prints inaccuracies, mistakes, blunders, accuracy, and
+average centipawn loss.
+
+Reference analysis defaults to:
+
+```text
+go nodes 1000000
+```
+
+Any reported inaccuracy, mistake, or blunder is confirmed again at:
+
+```text
+go nodes 2000000
+```
+
+Explicit `--ref-nodes` or `--ref-depth` values are used exactly and skip the
+confirmation pass.
+
+## Cache Files
+
+Replay analysis is saved next to the log as:
+
+```text
+game.<analysis-key>_analysis
+```
+
+`--log` analysis is saved as:
+
+```text
+game.analysis
+```
+
+Matching analysis files are reused automatically. Use `--force` to ignore the
+cache. Use `--verbose` to print the cache provenance hashes.
+
+## Log Requirements
+
+The input must be a UCI transcript containing search blocks:
+
+```text
+position ...
+go ...
+info depth ... nodes ...
+bestmove ...
+```
+
+Required:
+
+- `position startpos moves ...` or `position fen ...`
+- `go ...`
+- `bestmove <uci>`
+
+Useful optional lines:
+
+- `info ... nodes N ...` for bounded replay
+- `search_position start: fen=...` for FENs in verbose reports
+- `WARNING...` / `ERROR...` diagnostics, printed with the related move
+
+If `game.pgn` exists next to `game.log`, replay uses its mainline length to
+ignore post-game searches left in the log.
+
+## Common Commands
+
+Replay one log:
+
+```sh
+replay "game.log"
+```
+
+Replay with an explicit candidate engine:
+
+```sh
+replay --engine ./build/enyo "game.log"
+```
+
+Analyze logged moves only; do not run the candidate engine:
+
+```sh
+replay --log "game.log"
+```
+
+Batch replay:
+
+```sh
+replay --jobs 4 ~/code/cpp/chess/enyo/bugs
+```
+
+Replay one logged engine move:
+
+```sh
+replay --move 53 --count 1 "game.log"
+```
+
+Use original logged time-control commands:
+
+```sh
+replay --time "game.log"
+```
+
+Skip per-move output:
+
+```sh
+replay --summary-only "game.log"
+```
+
+Re-run even if a cache file exists:
+
+```sh
+replay --force "game.log"
+```
+
+Replay without reference analysis:
+
+```sh
+replay --no-analysis "game.log"
+```
+
+Use another reference engine:
+
+```sh
+replay --reference ~/source/berserk/src/berserk "game.log"
+```
+
+Change reference budget:
+
+```sh
+replay --ref-nodes 2000000 "game.log"
+replay --ref-depth 16 "game.log"
+```
+
+Show cache hashes, UCI traffic, and FENs:
+
+```sh
+replay --verbose "game.log"
+```
+
+Color judgement labels:
+
+```sh
+replay --color "game.log"
+```
 
 ## Build
 
@@ -14,181 +173,9 @@ cmake -S . -B build
 cmake --build build
 ```
 
-By default, the build uses the Enyo source tree at `../enyo` for move
-notation helpers. Override with `-DENYO_SOURCE_DIR=/path/to/enyo` if needed.
-
-## Log Requirements
-
-The input log must be a plain UCI transcript with one or more search blocks:
-
-```text
-position ...
-go ...
-info depth ...
-bestmove ...
-```
-
-`position` may be `position startpos moves ...` or `position fen ...`.
-`go` is the original command sent to the engine. By default replay uses the
-maximum `info depth` seen before `bestmove` and replays with `go depth N`.
-With `--time`, replay sends the original logged `go` command instead.
-
-`bestmove` must be a UCI move. Enyo `EMERGENCY_MOVE: ... move=<uci>` lines are
-also treated as logged moves. `setoption ...` lines, if present before the
-searches, are sent to the candidate engine before replay starts.
-Lines beginning with `WARNING` or `ERROR` are printed even when `--verbose` is
-off. Search warnings are printed immediately after the move they belong to.
-FEN text inside warnings is hidden unless `--verbose` is used.
-
-FEN in the saved report is optional metadata. Enyo logs include
-`search_position start: fen=...`; other UCI logs usually do not. Replay shows
-FENs in console output only with `--verbose`.
-
-If the final logged side-to-move clock reaches 1ms and the final move does not
-leave checkmate, stalemate, a 50-move draw, or basic insufficient material,
-replay adds a final `timeout:` line to the report. This is inferred from the UCI
-`go wtime/btime` command; the actual game termination still belongs in PGN or
-bot/server logs.
-When the final status can be inferred from the log, replay also adds a `game:`
-line after any `timeout:` line, from the logged engine's perspective.
-
-If `game.pgn` exists next to `game.log`, replay uses the PGN mainline length
-to ignore post-game searches left in the log after the actual final move.
-
-## Examples
-
-Replay one log with `enyo` from `PATH`:
+The build uses the Enyo source tree at `../enyo` for move notation helpers.
+Override it with:
 
 ```sh
-replay "game.log"
-```
-
-Candidate engine initialization is hidden by default; use `--verbose` to print
-full UCI traffic, cache hashes, and FENs.
-Move output keeps UCI first for grepping, with algebraic notation in
-parentheses and the reference engine's best move/score appended when analyzed.
-Candidate replay uses the final logged `info ... nodes N` value as `go nodes
-N`. If a search has no logged node count, replay falls back to the original
-logged `go` command. `--time` also uses the original logged `go wtime/btime`
-command for every move.
-
-Replay analysis is saved beside the log as `game.<analysis-key>_analysis`.
-Log analysis from `--log` is saved as `game.analysis`.
-Reports include Lichess-style accuracy and average centipawn loss for the
-successfully reference-scored moves. With the default reference budget, replay
-first scans every move at 1,000,000 nodes, then rechecks only reported
-inaccuracies, mistakes, and blunders at 2,000,000 nodes before writing the
-final report. Explicit `--ref-nodes` and `--ref-depth` values are used exactly
-as supplied and skip that confirmation pass.
-`replay` exits nonzero when the report contains a blunder or timeout.
-The key hashes the log, sibling PGN when present, replay/analysis mode,
-candidate and reference UCI identity, and content hashes for NNUE/file-valued
-options that exist locally. Engine paths and binary content are ignored so
-reports can be reused across machines with matching UCI identity and network
-settings. Enyo identity uses the full `Enyo Release ...` version string but
-drops the `built ...` timestamp. For replay analysis it also hashes the exact
-setoption stream sent by replay.
-Reference analysis resets the reference engine before each best-move search and
-again before each played-move `searchmoves` search, so a full run and
-`--move N --count 1` judge the same FEN from the same reference state.
-If that file already exists, replay reuses it and skips the log.
-Limited/debug runs such as `--move` and `--count` are not cached.
-Use `--verbose` to print the cache provenance hashes, for example:
-`analysis-key 91c8a4d2 | candidate cfg 7d2a4b10 | reference cfg 41f0aa29 | log b13c9a02 | target log | ref-nodes 1000000 | confirm-nodes 2000000 | ref-state fresh | nnue2 d43206fe`.
-
-Replay one log with an explicit engine:
-
-```sh
-replay --engine ../assets/engines/enyo_ee7052f "game.log"
-```
-
-The engine can also be positional:
-
-```sh
-replay ../assets/engines/enyo_ee7052f "game.log"
-```
-
-Replay several matching logs; non-`.log` matches are ignored:
-
-```sh
-replay *_oot*
-```
-
-Run several logs in parallel. Output is captured per log and printed as
-complete filename blocks, so lines do not interleave:
-
-```sh
-replay --jobs 4 ~/code/cpp/chess/enyo/bugs
-```
-
-Pressing `Ctrl+C` during a batch run stops the whole batch.
-
-Start at a fullmove number and replay one logged engine move:
-
-```sh
-replay --move 53 --count 1 "game.log"
-```
-
-Replay with the original logged time-control command instead of logged depth:
-
-```sh
-replay --time --threads 4 --move 53 --count 1 "game.log"
-```
-
-Analyze the fixed logged moves without running the candidate engine:
-
-```sh
-replay --log "game.log"
-```
-
-Suppress individual move lines and print only the final summaries:
-
-```sh
-replay --log --summary-only "game.log"
-```
-
-With `--log`, `--time` is ignored and replay prints a warning.
-`--log` cannot be combined with `--no-analysis`.
-
-Use a specific reference engine. Reference analysis defaults to `go nodes
-1000000`, with reported moves confirmed at `go nodes 2000000`:
-
-```sh
-replay --engine ./build/enyo --reference stockfish "game.log"
-```
-
-Use a fixed reference depth instead:
-
-```sh
-replay --engine ./build/enyo --reference stockfish --ref-depth 16 "game.log"
-```
-
-Use a different node budget exactly, without the confirmation pass:
-
-```sh
-replay --ref-nodes 2000000 "game.log"
-```
-
-Follow the logged engine depth for reference analysis:
-
-```sh
-replay --ref-depth 0 "game.log"
-```
-
-Re-analyze even when a matching analysis file already exists:
-
-```sh
-replay --force "game.log"
-```
-
-Replay without the end analysis:
-
-```sh
-replay --no-analysis "game.log"
-```
-
-Color judgement labels in console output:
-
-```sh
-replay --color "game.log"
+cmake -S . -B build -DENYO_SOURCE_DIR=/path/to/enyo
 ```

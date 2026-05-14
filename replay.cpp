@@ -766,8 +766,8 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
 
     std::string judgement = validation.reference_best
         ? (validation.best_score.empty() ? "best" : fmt::format("best {}", validation.best_score))
-        : fmt::format("loss {}cp", validation.cp_loss);
-    std::string label = validation.reference_best ? "best" : "";
+        : (validation.cp_loss == 0 ? "equal" : fmt::format("loss {}cp", validation.cp_loss));
+    std::string label = validation.reference_best || validation.cp_loss == 0 ? "best" : "";
 
     return fmt::format("ref {}{}",
                        colorizeJudgementToken(fmt::format("{:<{}}", judgement, judgement_width), label, color),

@@ -2387,8 +2387,10 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             throw std::runtime_error(fmt::format("failed to start job: {}", strerror(errno)));
         output_paths[next] = output_path;
         running.push_back({pid, next, output_path, std::chrono::steady_clock::now()});
-        fmt::print("analyzing [{}/{}] {}\n", next + 1, logs.size(), logs[next].filename().string());
-        std::fflush(stdout);
+        if (completed == 0) {
+            fmt::print("analyzing [{}/{}] {}\n", next + 1, logs.size(), logs[next].filename().string());
+            std::fflush(stdout);
+        }
         next++;
     };
     auto print_finished = [&](const RunningJob& job, int status) {

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -2104,6 +2105,7 @@ struct RunningJob {
     pid_t pid = -1;
     size_t index = 0;
     std::filesystem::path output_path;
+    std::chrono::steady_clock::time_point started;
 };
 
 pid_t startBatchJob(const std::string& command) {
@@ -2132,6 +2134,26 @@ void printJobOutput(const std::filesystem::path& path) {
     std::string line;
     while (std::getline(file, line))
         fmt::print("{}\n", line);
+}
+
+void printBatchProgress(const std::vector<RunningJob>& running,
+                        const std::vector<std::filesystem::path>& logs,
+                        size_t completed) {
+    auto now = std::chrono::steady_clock::now();
+    auto oldest = running.front();
+    for (const auto& job : running) {
+        if (job.started < oldest.started)
+            oldest = job;
+    }
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - oldest.started).count();
+    fmt::print("progress: {}/{} done, {} running, oldest {}s: {}\n",
+               completed,
+               logs.size(),
+               running.size(),
+               elapsed,
+               logs[oldest.index].filename().string());
+    std::fflush(stdout);
 }
 
 int runLogs(const std::vector<std::filesystem::path>& logs,
@@ -2170,6 +2192,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
     std::vector<RunningJob> running;
     std::vector<std::filesystem::path> output_paths(logs.size());
     size_t next = 0;
+    size_t completed = 0;
     fmt::print("Running {} logs with {} jobs; output prints as each log finishes.\n",
                logs.size(), jobs);
     std::fflush(stdout);
@@ -2182,7 +2205,9 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         if (pid < 0)
             throw std::runtime_error(fmt::format("failed to start job: {}", strerror(errno)));
         output_paths[next] = output_path;
-        running.push_back({pid, next, output_path});
+        running.push_back({pid, next, output_path, std::chrono::steady_clock::now()});
+        fmt::print("started [{}/{}] {}\n", next + 1, logs.size(), logs[next].filename().string());
+        std::fflush(stdout);
         next++;
     };
     auto print_finished = [&](const RunningJob& job, int status) {
@@ -2198,6 +2223,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         }
         if (status != 0)
             failures++;
+        completed++;
         return true;
     };
 
@@ -2205,15 +2231,25 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         while (next < logs.size() && running.size() < (size_t)jobs)
             launch_next();
 
+        auto last_progress = std::chrono::steady_clock::now();
         while (!running.empty()) {
             int status = 0;
-            pid_t done = waitpid(-1, &status, 0);
+            pid_t done = waitpid(-1, &status, WNOHANG);
             if (done < 0) {
                 if (errno == EINTR) {
                     terminateJobs(running);
                     return 128 + SIGINT;
                 }
                 throw std::runtime_error(fmt::format("waitpid failed: {}", strerror(errno)));
+            }
+            if (done == 0) {
+                auto now = std::chrono::steady_clock::now();
+                if (now - last_progress >= std::chrono::seconds(10)) {
+                    printBatchProgress(running, logs, completed);
+                    last_progress = now;
+                }
+                usleep(100000);
+                continue;
             }
 
             auto job = std::find_if(running.begin(), running.end(),

@@ -113,6 +113,13 @@ Batch replay:
 replay --jobs 4 ~/code/cpp/chess/enyo/bugs
 ```
 
+Batch replay from a filtered list:
+
+```sh
+ls *.log | grep -v _oot | replay --jobs 4
+ls *.log | grep -v _oot | replay --jobs 4 -
+```
+
 Replay one logged engine move:
 
 ```sh

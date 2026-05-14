@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -526,6 +527,32 @@ bool terminalAfterMove(const LogEntry& entry) {
     return terminalStatusAfterMove(entry).has_value();
 }
 
+bool opponentHasImmediateCheckmateAfterMove(const LogEntry& entry) {
+    auto board = boardFromPosition(entry.position);
+    if (!board)
+        return false;
+    if (!applyUciMove(*board, entry.expected))
+        return false;
+
+    if (board->side == enyo::white) {
+        for (const auto& move : generate_legal_moves<enyo::white, false, false>(*board)) {
+            enyo::Board next = *board;
+            apply_move<enyo::white>(next, move);
+            if (!hasLegalMoves(next) && isInCheck(next))
+                return true;
+        }
+    } else {
+        for (const auto& move : generate_legal_moves<enyo::black, false, false>(*board)) {
+            enyo::Board next = *board;
+            apply_move<enyo::black>(next, move);
+            if (!hasLegalMoves(next) && isInCheck(next))
+                return true;
+        }
+    }
+
+    return false;
+}
+
 std::string algebraForMove(const std::string& position, const std::string& move) {
     if (move.empty() || move == "(none)")
         return "";
@@ -910,6 +937,8 @@ std::string formatTimeoutReport(const std::vector<LogEntry>& entries, int displa
     if (clock < 0 || clock > 1)
         return "";
     if (terminalAfterMove(entry))
+        return "";
+    if (opponentHasImmediateCheckmateAfterMove(entry))
         return "";
 
     return fmt::format("{:<11} [{:>{}}/{}] {} clock reached {} on final move\n",
@@ -2178,7 +2207,8 @@ bool containsArgIndex(const std::vector<int>& indices, int value) {
 }
 
 bool isLogTarget(const std::string& path) {
-    return std::filesystem::path(path).extension() == ".log"
+    return path == "-"
+        || std::filesystem::path(path).extension() == ".log"
         || std::filesystem::is_directory(path);
 }
 
@@ -2215,9 +2245,27 @@ void appendDirectoryLogs(const std::filesystem::path& directory,
     }
 }
 
+void appendStdinLogs(std::vector<std::filesystem::path>& logs) {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty())
+            continue;
+        std::filesystem::path path = line;
+        if (std::filesystem::is_directory(path)) {
+            appendDirectoryLogs(path, logs);
+        } else if (path.extension() == ".log") {
+            logs.push_back(path);
+        }
+    }
+}
+
 std::vector<std::filesystem::path> collectLogTargets(const std::vector<std::string>& targets) {
     std::vector<std::filesystem::path> logs;
     for (const auto& target : targets) {
+        if (target == "-") {
+            appendStdinLogs(logs);
+            continue;
+        }
         std::filesystem::path path = target;
         if (std::filesystem::is_directory(path)) {
             appendDirectoryLogs(path, logs);
@@ -2339,6 +2387,35 @@ void printBatchProgress(const std::vector<RunningJob>& running,
     std::fflush(stdout);
 }
 
+int waitForBatchJob(const RunningJob& job,
+                    const std::vector<std::filesystem::path>& logs,
+                    size_t completed) {
+    auto last_progress = std::chrono::steady_clock::now();
+    while (true) {
+        int status = 0;
+        pid_t done = waitpid(job.pid, &status, WNOHANG);
+        if (done < 0) {
+            if (errno == EINTR) {
+                kill(job.pid, SIGTERM);
+                waitpid(job.pid, nullptr, 0);
+                return 128 + SIGINT;
+            }
+            throw std::runtime_error(fmt::format("waitpid failed: {}", strerror(errno)));
+        }
+        if (done == 0) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_progress >= std::chrono::seconds(10)) {
+                printBatchProgress(std::vector<RunningJob>{job}, logs, completed);
+                last_progress = now;
+            }
+            usleep(100000);
+            continue;
+        }
+
+        return status;
+    }
+}
+
 int runLogs(const std::vector<std::filesystem::path>& logs,
             int argc,
             char* argv[],
@@ -2361,10 +2438,14 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             auto output_path = tempOutputPath(i);
             std::string command = batchCommand(argv, argc, logfile_arg_indices,
                                                logs[i], output_path);
-            int rc = std::system(command.c_str());
+            pid_t pid = startBatchJob(command);
+            if (pid < 0)
+                throw std::runtime_error(fmt::format("failed to start job: {}", strerror(errno)));
+            int rc = waitForBatchJob({pid, i, output_path, std::chrono::steady_clock::now()},
+                                     logs, i);
             printJobOutput(output_path);
             std::filesystem::remove(output_path);
-            if (interruptedStatus(rc))
+            if (rc == 128 + SIGINT || interruptedStatus(rc))
                 return 128 + SIGINT;
             if (rc != 0)
                 failures++;
@@ -2448,8 +2529,11 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             running.erase(job);
             if (!print_finished(finished, status))
                 return 128 + SIGINT;
-            if (next < logs.size())
+            if (next < logs.size()) {
                 launch_next();
+                printBatchProgress(running, logs, completed);
+                last_progress = std::chrono::steady_clock::now();
+            }
         }
     } catch (...) {
         terminateJobs(running);
@@ -2494,6 +2578,7 @@ int main(int argc, char* argv[]) {
             "Replay UCI log searches and compare engine output with logged moves.\n"
             "Candidate replay uses the logged final node count when available.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
+            "Use '-' or pipe newline-separated paths on stdin to read log targets from stdin.\n"
             "At the end, analyze replayed moves with a reference engine.\n"
             "Replay reports are saved as <log>.<analysis-key>_analysis.\n"
             "Log reports are saved as <log>.analysis.\n"
@@ -2608,6 +2693,9 @@ int main(int argc, char* argv[]) {
         logfile_arg_indices.push_back(logfile_arg_index);
     }
 
+    if (logfile_targets.empty() && !isatty(STDIN_FILENO))
+        logfile_targets.push_back("-");
+
     if (logfile_targets.empty()) {
         fmt::print(stderr, "ERROR: No logfile specified\n\n");
         print_help(argv[0]);
@@ -2624,9 +2712,10 @@ int main(int argc, char* argv[]) {
                       && count < 0;
     bool confirm_reportable = analyze
                             && shouldConfirmReportableMoves(reference_limit, reference_limit_explicit);
+    bool stdin_input = std::find(logfile_targets.begin(), logfile_targets.end(), "-") != logfile_targets.end();
 
     bool logfile_is_directory = !batch_input && std::filesystem::is_directory(logfile);
-    bool run_as_batch = batch_input || logfile_is_directory;
+    bool run_as_batch = batch_input || logfile_is_directory || stdin_input;
 
     bool warn_log_time = analyze
                       && time_mode

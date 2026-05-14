@@ -2168,10 +2168,12 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
     }
 
     std::vector<RunningJob> running;
-    std::vector<std::optional<int>> completed(logs.size());
     std::vector<std::filesystem::path> output_paths(logs.size());
     size_t next = 0;
-    size_t next_print = 0;
+    fmt::print("Running {} logs with {} jobs; output prints as each log finishes.\n",
+               logs.size(), jobs);
+    std::fflush(stdout);
+
     auto launch_next = [&] {
         auto output_path = tempOutputPath(next);
         std::string command = batchCommand(argv, argc, logfile_arg_indices,
@@ -2183,22 +2185,19 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         running.push_back({pid, next, output_path});
         next++;
     };
-    auto print_completed = [&] {
-        while (next_print < logs.size() && completed[next_print]) {
-            fmt::print("\n[{}/{}] {}\n",
-                       next_print + 1, logs.size(), logs[next_print].filename().string());
-            printJobOutput(output_paths[next_print]);
-            std::filesystem::remove(output_paths[next_print]);
+    auto print_finished = [&](const RunningJob& job, int status) {
+        fmt::print("\n[{}/{}] {}\n",
+                   job.index + 1, logs.size(), logs[job.index].filename().string());
+        printJobOutput(job.output_path);
+        std::filesystem::remove(job.output_path);
+        std::fflush(stdout);
 
-            int status = *completed[next_print];
-            if (interruptedStatus(status)) {
-                terminateJobs(running);
-                return false;
-            }
-            if (status != 0)
-                failures++;
-            next_print++;
+        if (interruptedStatus(status)) {
+            terminateJobs(running);
+            return false;
         }
+        if (status != 0)
+            failures++;
         return true;
     };
 
@@ -2224,15 +2223,13 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             if (job == running.end())
                 continue;
 
-            completed[job->index] = status;
+            RunningJob finished = *job;
             running.erase(job);
+            if (!print_finished(finished, status))
+                return 128 + SIGINT;
             if (next < logs.size())
                 launch_next();
-            if (!print_completed())
-                return 128 + SIGINT;
         }
-        if (!print_completed())
-            return 128 + SIGINT;
     } catch (...) {
         terminateJobs(running);
         for (const auto& output_path : output_paths) {

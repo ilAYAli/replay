@@ -73,7 +73,7 @@ Log analysis from `--log` is saved as `game.analysis`.
 Reports include Lichess-style accuracy and average centipawn loss for the
 successfully reference-scored moves. With the default reference budget, replay
 first scans every move at 1,000,000 nodes, then rechecks only reported
-inaccuracies, mistakes, and blunders at 5,000,000 nodes before writing the
+inaccuracies, mistakes, and blunders at 2,000,000 nodes before writing the
 final report. Explicit `--ref-nodes` and `--ref-depth` values are used exactly
 as supplied and skip that confirmation pass.
 `replay` exits nonzero when the report contains a blunder or timeout.
@@ -90,7 +90,7 @@ again before each played-move `searchmoves` search, so a full run and
 If that file already exists, replay reuses it and skips the log.
 Limited/debug runs such as `--move` and `--count` are not cached.
 Use `--verbose` to print the cache provenance hashes, for example:
-`analysis-key 91c8a4d2 | candidate cfg 7d2a4b10 | reference cfg 41f0aa29 | log b13c9a02 | target log | ref-nodes 1000000 | confirm-nodes 5000000 | ref-state fresh | nnue2 d43206fe`.
+`analysis-key 91c8a4d2 | candidate cfg 7d2a4b10 | reference cfg 41f0aa29 | log b13c9a02 | target log | ref-nodes 1000000 | confirm-nodes 2000000 | ref-state fresh | nnue2 d43206fe`.
 
 Replay one log with an explicit engine:
 
@@ -147,7 +147,7 @@ With `--log`, `--time` is ignored and replay prints a warning.
 `--log` cannot be combined with `--no-analysis`.
 
 Use a specific reference engine. Reference analysis defaults to `go nodes
-1000000`, with reported moves confirmed at `go nodes 5000000`:
+1000000`, with reported moves confirmed at `go nodes 2000000`:
 
 ```sh
 replay --engine ./build/enyo --reference stockfish "game.log"

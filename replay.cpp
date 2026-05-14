@@ -45,7 +45,7 @@ struct ParsedLog {
 constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNING";
 constexpr const char* kReplayBatch = "REPLAY_BATCH";
 constexpr int kDefaultReferenceNodes = 1'000'000;
-constexpr int kConfirmReferenceNodes = 5'000'000;
+constexpr int kConfirmReferenceNodes = 2'000'000;
 
 struct SearchResult {
     std::string bestmove;
@@ -2328,7 +2328,7 @@ int main(int argc, char* argv[]) {
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
             "  --ref-nodes N       Reference analysis nodes; default uses 1000000 nodes\n"
-            "                      and confirms reported moves at 5000000 nodes\n"
+            "                      and confirms reported moves at 2000000 nodes\n"
             "  --ref-depth N       Reference analysis depth instead of nodes; 0 follows logged depth\n"
             "  --log               Analyze logged moves instead of replayed moves;\n"
             "                      does not run the candidate engine\n"

@@ -2047,10 +2047,8 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         fmt::print(stderr, "ERROR: No .log files found\n");
         return 1;
     }
-    if (jobs > 1 && logs.size() < 2) {
-        fmt::print(stderr, "ERROR: --jobs requires more than one .log file\n");
-        return 1;
-    }
+    if (logs.size() < 2)
+        jobs = 1;
 
     int failures = 0;
     setenv(kReplayBatch, "1", 1);
@@ -2303,10 +2301,6 @@ int main(int argc, char* argv[]) {
 
     bool logfile_is_directory = !batch_input && std::filesystem::is_directory(logfile);
     bool run_as_batch = batch_input || logfile_is_directory;
-    if (!run_as_batch && jobs > 1) {
-        fmt::print(stderr, "ERROR: --jobs requires multiple log inputs or a directory\n");
-        return 1;
-    }
 
     bool warn_log_time = analyze
                       && time_mode
@@ -2322,8 +2316,8 @@ int main(int argc, char* argv[]) {
     if (run_as_batch)
         return runLogs(collectLogTargets(logfile_targets), argc, argv, logfile_arg_indices, jobs);
 
-    if (std::filesystem::path(logfile).extension() == ".pgn") {
-        fmt::print(stderr, "ERROR: replay needs an Enyo .log file.\n");
+    if (std::filesystem::path(logfile).extension() != ".log") {
+        fmt::print(stderr, "ERROR: replay needs a .log file.\n");
         return 1;
     }
 

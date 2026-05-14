@@ -68,7 +68,7 @@ full UCI traffic, cache hashes, and FENs.
 Move output keeps UCI first for grepping, with algebraic notation in
 parentheses and the reference engine's best move/score appended when analyzed.
 
-Replay analysis is saved beside the log as `game.<analysis-key>_rpl_analysis`.
+Replay analysis is saved beside the log as `game.<analysis-key>_analysis`.
 Log analysis from `--log` is saved as `game.analysis`.
 Reports include Lichess-style accuracy and average centipawn loss for the
 successfully reference-scored moves. With the default reference budget, replay

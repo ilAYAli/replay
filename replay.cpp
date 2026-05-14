@@ -1349,7 +1349,7 @@ std::filesystem::path analysisPath(const std::filesystem::path& logfile,
     if (analysis_target == "log")
         return logfile.parent_path() / fmt::format("{}.analysis", logfile.stem().string());
 
-    return logfile.parent_path() / fmt::format("{}.{}_rpl_analysis",
+    return logfile.parent_path() / fmt::format("{}.{}_analysis",
                                                logfile.stem().string(),
                                                analysis_key);
 }
@@ -2308,7 +2308,7 @@ int main(int argc, char* argv[]) {
             "Replay UCI log searches and compare engine output with logged moves.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
             "At the end, analyze replayed moves with a reference engine.\n"
-            "Replay reports are saved as <log>.<analysis-key>_rpl_analysis.\n"
+            "Replay reports are saved as <log>.<analysis-key>_analysis.\n"
             "Log reports are saved as <log>.analysis.\n"
             "\n"
             "Options:\n"

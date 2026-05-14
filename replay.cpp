@@ -747,15 +747,14 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
     if (!validation.ok)
         return fmt::format("{:<{}}", "n/a", judgement_width);
 
-    std::string best_suffix = validation.best_score.empty() ? "" : " " + validation.best_score;
-    if (!validation.bestmove.empty() && validation.bestmove != "(none)") {
-        best_suffix = fmt::format(" {}{}",
-                                  validation.best_display.empty() ? validation.bestmove : validation.best_display,
-                                  best_suffix);
+    std::string best_report;
+    if (!validation.reference_best
+     && !validation.bestmove.empty()
+     && validation.bestmove != "(none)") {
+        best_report = fmt::format(" | best {}",
+                                  validation.best_display.empty() ? validation.bestmove
+                                                                  : validation.best_display);
     }
-    std::string best_report = validation.reference_best && !best_suffix.empty()
-        ? ""
-        : " | best" + best_suffix;
 
     if (isReportableJudgement(validation.label)) {
         std::string judgement = fmt::format("{} {}cp", validation.label, validation.cp_loss);
@@ -766,7 +765,7 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
     }
 
     std::string judgement = validation.reference_best
-        ? fmt::format("best {}", validation.best_score)
+        ? (validation.best_score.empty() ? "best" : fmt::format("best {}", validation.best_score))
         : fmt::format("loss {}cp", validation.cp_loss);
     std::string label = validation.reference_best ? "best" : "";
 

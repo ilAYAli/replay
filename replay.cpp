@@ -105,6 +105,17 @@ struct EngineConfig {
     std::string nnue2_hash;
 };
 
+enum class ReferenceLimitKind {
+    Nodes,
+    Depth,
+    LoggedDepth
+};
+
+struct ReferenceLimit {
+    ReferenceLimitKind kind = ReferenceLimitKind::Nodes;
+    int value = 1'000'000;
+};
+
 struct AnalysisCache {
     std::string key;
     std::string provenance;
@@ -1202,15 +1213,46 @@ EngineConfig probeEngineConfig(const std::string& engine_path,
     };
 }
 
-std::string analysisModeName(bool time_mode, int analysis_depth, const std::string& analysis_target) {
+ReferenceLimit resolveReferenceLimit(const ReferenceLimit& limit, int logged_depth) {
+    if (limit.kind != ReferenceLimitKind::LoggedDepth)
+        return limit;
+
+    return {ReferenceLimitKind::Depth, std::max(1, logged_depth)};
+}
+
+std::string referenceLimitName(const ReferenceLimit& limit) {
+    switch (limit.kind) {
+    case ReferenceLimitKind::Nodes:
+        return fmt::format("nodes{}", limit.value);
+    case ReferenceLimitKind::Depth:
+        return fmt::format("depth{}", limit.value);
+    case ReferenceLimitKind::LoggedDepth:
+        return "log-depth";
+    }
+
+    return "unknown";
+}
+
+std::string referenceLimitDisplay(const ReferenceLimit& limit) {
+    switch (limit.kind) {
+    case ReferenceLimitKind::Nodes:
+        return fmt::format("ref-nodes {}", limit.value);
+    case ReferenceLimitKind::Depth:
+        return fmt::format("ref-depth {}", limit.value);
+    case ReferenceLimitKind::LoggedDepth:
+        return "ref-depth log";
+    }
+
+    return "ref-limit unknown";
+}
+
+std::string analysisModeName(bool time_mode, const ReferenceLimit& reference_limit, const std::string& analysis_target) {
     std::string mode = analysis_target == "log"
         ? "log"
         : (time_mode ? "time" : "replay");
-    if (analysis_depth == 20)
+    if (reference_limit.kind == ReferenceLimitKind::Nodes && reference_limit.value == 1'000'000)
         return mode;
-    if (analysis_depth == 0)
-        return mode + "_log-depth";
-    return fmt::format("{}_depth{}", mode, analysis_depth);
+    return fmt::format("{}_{}", mode, referenceLimitName(reference_limit));
 }
 
 std::filesystem::path analysisPath(const std::filesystem::path& logfile,
@@ -1246,7 +1288,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                  const EngineConfig& candidate,
                                  const EngineConfig& reference,
                                  bool time_mode,
-                                 int analysis_depth,
+                                 const ReferenceLimit& reference_limit,
                                  const std::string& analysis_target) {
     auto pgn_path = logfile;
     pgn_path.replace_extension(".pgn");
@@ -1254,23 +1296,23 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
     std::string log_hash = hashFileContent(logfile);
     std::string pgn_hash = std::filesystem::exists(pgn_path) ? hashFileContent(pgn_path) : "none";
     std::string input_hash = hashString(fmt::format("log={}\npgn={}\n", log_hash, pgn_hash));
-    std::string mode = analysisModeName(time_mode, analysis_depth, analysis_target);
-    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\ndepth={}\n",
+    std::string mode = analysisModeName(time_mode, reference_limit, analysis_target);
+    std::string mode_hash = hashString(fmt::format("mode={}\ntime={}\ntarget={}\nref-limit={}\n",
                                                    mode, time_mode, analysis_target,
-                                                   analysis_depth));
+                                                   referenceLimitName(reference_limit)));
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v9\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v10\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
-        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | ref-depth {} | nnue2 {}",
+        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | {} | nnue2 {}",
         key,
         candidate.hash,
         reference.hash,
         input_hash,
         analysis_target,
-        analysis_depth,
+        referenceLimitDisplay(reference_limit),
         candidate.nnue2_hash);
 
     return {key, provenance};
@@ -1324,25 +1366,32 @@ void updateReferenceScore(ReferenceResult& result, const std::string& line, int 
 
 ReferenceResult referenceSearch(EngineProcess& engine,
                                 const std::string& position,
-                                int depth,
+                                const ReferenceLimit& limit,
                                 bool progress,
                                 const std::string& progress_text,
                                 const std::string& search_move = "") {
     ReferenceResult result;
     int stm_sign = sideToMoveSign(position);
-    int target_depth = std::max(1, depth);
+    int target = std::max(1, limit.value);
     int last_reported_depth = -1;
+    int last_reported_nodes = -1;
 
     if (progress) {
-        fmt::print("\r\033[K{} depth 0/{}", progress_text, target_depth);
+        if (limit.kind == ReferenceLimitKind::Nodes)
+            fmt::print("\r\033[K{} nodes 0/{}", progress_text, target);
+        else
+            fmt::print("\r\033[K{} depth 0/{}", progress_text, target);
         fflush(stdout);
     }
 
     engine.send(position);
+    std::string go_limit = limit.kind == ReferenceLimitKind::Nodes
+        ? fmt::format("nodes {}", target)
+        : fmt::format("depth {}", target);
     if (search_move.empty())
-        engine.send(fmt::format("go depth {}", target_depth));
+        engine.send(fmt::format("go {}", go_limit));
     else
-        engine.send(fmt::format("go depth {} searchmoves {}", target_depth, search_move));
+        engine.send(fmt::format("go {} searchmoves {}", go_limit, search_move));
 
     while (true) {
         auto line = engine.readLine();
@@ -1351,11 +1400,21 @@ ReferenceResult referenceSearch(EngineProcess& engine,
 
         updateReferenceScore(result, *line, stm_sign);
         if (progress && line->find("info depth ") != std::string::npos) {
-            int current_depth = extractDepth(*line);
-            if (current_depth > 0 && current_depth != last_reported_depth) {
-                last_reported_depth = current_depth;
-                fmt::print("\r\033[K{} depth {}/{}", progress_text, current_depth, target_depth);
-                fflush(stdout);
+            if (limit.kind == ReferenceLimitKind::Nodes) {
+                int current_nodes = parseIntField(*line, "nodes");
+                if (current_nodes > 0 && current_nodes != last_reported_nodes) {
+                    last_reported_nodes = current_nodes;
+                    fmt::print("\r\033[K{} nodes {}/{}", progress_text,
+                               std::min(current_nodes, target), target);
+                    fflush(stdout);
+                }
+            } else {
+                int current_depth = extractDepth(*line);
+                if (current_depth > 0 && current_depth != last_reported_depth) {
+                    last_reported_depth = current_depth;
+                    fmt::print("\r\033[K{} depth {}/{}", progress_text, current_depth, target);
+                    fflush(stdout);
+                }
             }
         }
         if (startsWith(*line, "bestmove ")) {
@@ -1368,7 +1427,8 @@ ReferenceResult referenceSearch(EngineProcess& engine,
 MoveValidation validateMove(EngineProcess& reference,
                             const std::string& position,
                             const std::string& played_move,
-                            int depth,
+                            const ReferenceLimit& limit,
+                            int logged_depth,
                             int fullmove,
                             int display_total,
                             bool progress) {
@@ -1378,9 +1438,10 @@ MoveValidation validateMove(EngineProcess& reference,
         return validation;
     }
 
+    ReferenceLimit resolved_limit = resolveReferenceLimit(limit, logged_depth);
     ReferenceResult best = referenceSearch(reference,
                                           position,
-                                          depth,
+                                          resolved_limit,
                                           progress,
                                           fmt::format("analyzing [{}/{}] reference-best",
                                                       fullmove, display_total));
@@ -1403,7 +1464,7 @@ MoveValidation validateMove(EngineProcess& reference,
 
     ReferenceResult played = referenceSearch(reference,
                                             position,
-                                            depth,
+                                            resolved_limit,
                                             progress,
                                             fmt::format("analyzing [{}/{}] played-move",
                                                         fullmove, display_total),
@@ -1452,7 +1513,7 @@ void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
 
 void analyzeLoggedMoves(EngineProcess& reference,
                         const std::vector<LogEntry>& entries,
-                        int analysis_depth,
+                        const ReferenceLimit& reference_limit,
                         int display_total,
                         const ReplayLineWidths& line_widths,
                         bool progress,
@@ -1462,11 +1523,11 @@ void analyzeLoggedMoves(EngineProcess& reference,
                         std::vector<AnalysisEntry>& report,
                         int& analysis_failures) {
     for (const auto& entry : entries) {
-        int depth = analysis_depth > 0 ? analysis_depth : entry.depth;
         MoveValidation validation = validateMove(reference,
                                                  entry.position,
                                                  entry.expected,
-                                                 depth,
+                                                 reference_limit,
+                                                 entry.depth,
                                                  entry.fullmove,
                                                  display_total,
                                                  progress);
@@ -1922,7 +1983,7 @@ int main(int argc, char* argv[]) {
     int start_move = 0;
     int count = -1;
     int threads = -1;
-    int analysis_depth = 20;
+    ReferenceLimit reference_limit;
     std::string analysis_target = "replay";
     bool time_mode = false;
     bool analyze = true;
@@ -1947,7 +2008,8 @@ int main(int argc, char* argv[]) {
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
-            "  --ref-depth N       Reference analysis depth (default: 20; 0 follows logged depth)\n"
+            "  --ref-nodes N       Reference analysis nodes (default: 1000000)\n"
+            "  --ref-depth N       Reference analysis depth instead of nodes; 0 follows logged depth\n"
             "  --log               Analyze logged moves instead of replayed moves;\n"
             "                      does not run the candidate engine\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
@@ -1974,8 +2036,13 @@ int main(int argc, char* argv[]) {
             engine_path_explicit = true;
         } else if (arg == "--reference" && i + 1 < argc) {
             reference_path = argv[++i];
+        } else if (arg == "--ref-nodes" && i + 1 < argc) {
+            reference_limit = {ReferenceLimitKind::Nodes, std::max(1, std::stoi(argv[++i]))};
         } else if (arg == "--ref-depth" && i + 1 < argc) {
-            analysis_depth = std::max(0, std::stoi(argv[++i]));
+            int depth = std::max(0, std::stoi(argv[++i]));
+            reference_limit = depth == 0
+                ? ReferenceLimit{ReferenceLimitKind::LoggedDepth, 0}
+                : ReferenceLimit{ReferenceLimitKind::Depth, depth};
         } else if (arg == "--log") {
             analysis_target = "log";
         } else if (arg == "--no-analysis") {
@@ -2105,7 +2172,7 @@ int main(int argc, char* argv[]) {
                 : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
             auto reference_config = probeEngineConfig(reference_path, {});
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
-                                       time_mode, analysis_depth, analysis_target);
+                                       time_mode, reference_limit, analysis_target);
             report_path = analysisPath(logfile_path, cache->key, analysis_target);
 
             if (!force && std::filesystem::exists(report_path)
@@ -2119,29 +2186,29 @@ int main(int argc, char* argv[]) {
                     cached_provenance = cached_report.substr(0, newline);
                     cached_body = newline == std::string::npos ? "" : cached_report.substr(newline + 1);
                 }
-                std::string updated_body = replaceDerivedReportLines(cached_body,
-                                                                     full_log_game_report,
-                                                                     full_log_timeout_report);
-                if (updated_body != cached_body) {
-                    cached_body = updated_body;
-                    std::string updated_report = cached_provenance.empty()
-                        ? cached_body
-                        : cached_provenance + "\n" + cached_body;
-                    writeFile(report_path, updated_report);
-                }
+                if (cached_provenance == cache->provenance) {
+                    std::string updated_body = replaceDerivedReportLines(cached_body,
+                                                                         full_log_game_report,
+                                                                         full_log_timeout_report);
+                    if (updated_body != cached_body) {
+                        cached_body = updated_body;
+                        std::string updated_report = cached_provenance + "\n" + cached_body;
+                        writeFile(report_path, updated_report);
+                    }
 
-                if (!batch_mode)
-                    fmt::print("cached: {}\n", report_path.string());
-                if (verbose)
-                    fmt::print("{}\n", cache->provenance);
-                fmt::print("{}",
-                           formatDiagnosticsReport(entries, final_log_entry.fullmove,
-                                                   color_output, verbose));
-                fmt::print("=== Summary ===\n{}",
-                           displayAnalysisReport(cached_body, color_output, verbose));
-                if (cached_body.empty() || cached_body.back() != '\n')
-                    fmt::print("\n");
-                return reportTriggersFailure(cached_body) ? 1 : 0;
+                    if (!batch_mode)
+                        fmt::print("cached: {}\n", report_path.string());
+                    if (verbose)
+                        fmt::print("{}\n", cache->provenance);
+                    fmt::print("{}",
+                               formatDiagnosticsReport(entries, final_log_entry.fullmove,
+                                                       color_output, verbose));
+                    fmt::print("=== Summary ===\n{}",
+                               displayAnalysisReport(cached_body, color_output, verbose));
+                    if (cached_body.empty() || cached_body.back() != '\n')
+                        fmt::print("\n");
+                    return reportTriggersFailure(cached_body) ? 1 : 0;
+                }
             }
         }
 
@@ -2199,7 +2266,7 @@ int main(int argc, char* argv[]) {
             std::vector<AnalysisEntry> report;
             int analysis_failures = 0;
 
-            analyzeLoggedMoves(*reference, entries, analysis_depth, display_total,
+            analyzeLoggedMoves(*reference, entries, reference_limit, display_total,
                                line_widths, progress, print_move_output,
                                color_output, verbose, report, analysis_failures);
 
@@ -2271,14 +2338,14 @@ int main(int argc, char* argv[]) {
 
             std::string reference_suffix;
             if (analyze) {
-                int depth = analysis_depth > 0 ? analysis_depth : entry.depth;
                 std::string analyzed_move = analysis_target == "log"
                     ? entry.expected
                     : result.bestmove;
                 MoveValidation validation = validateMove(*reference,
                                                          entry.position,
                                                          analyzed_move,
-                                                         depth,
+                                                         reference_limit,
+                                                         entry.depth,
                                                          entry.fullmove,
                                                          display_total,
                                                          progress);

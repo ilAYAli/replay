@@ -854,20 +854,20 @@ std::string displayAnalysisReport(const std::string& report, bool color, bool in
             int avg_loss = -1;
             if (std::sscanf(line.c_str(), "accuracy: %d%% avg loss: %dcp",
                             &accuracy, &avg_loss) == 2) {
-                normalized += fmt::format("{:<11} {}%\n", "Accuracy:", accuracy);
-                normalized += fmt::format("{:<11} {}cp\n", "Avg loss:", avg_loss);
+                normalized += fmt::format("{:<11} {}%\n", "accuracy:", accuracy);
+                normalized += fmt::format("{:<11} {}cp\n", "avg loss:", avg_loss);
                 continue;
             }
         } else if (startsWith(line, "accuracy:")) {
             int accuracy = -1;
             if (std::sscanf(line.c_str(), "accuracy: %d%%", &accuracy) == 1) {
-                normalized += fmt::format("{:<11} {}%\n", "Accuracy:", accuracy);
+                normalized += fmt::format("{:<11} {}%\n", "accuracy:", accuracy);
                 continue;
             }
         } else if (startsWith(line, "avg loss:")) {
             int avg_loss = -1;
             if (std::sscanf(line.c_str(), "avg loss: %dcp", &avg_loss) == 1) {
-                normalized += fmt::format("{:<11} {}cp\n", "Avg loss:", avg_loss);
+                normalized += fmt::format("{:<11} {}cp\n", "avg loss:", avg_loss);
                 continue;
             }
         }
@@ -1028,8 +1028,8 @@ std::string formatAccuracyReport(const AnalysisStats& stats) {
     int accuracy = std::clamp(static_cast<int>(std::lround(stats.accuracy / stats.moves)), 0, 100);
     int avg_loss = static_cast<int>(std::lround(static_cast<double>(stats.cp_loss) / stats.moves));
     return fmt::format("{:<11} {}%\n{:<11} {}cp\n",
-                       "Accuracy:", accuracy,
-                       "Avg loss:", avg_loss);
+                       "accuracy:", accuracy,
+                       "avg loss:", avg_loss);
 }
 
 std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,

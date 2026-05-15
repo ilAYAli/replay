@@ -9,11 +9,8 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <map>
 #include <memory>
 #include <optional>
-#include <fcntl.h>
-#include <poll.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -25,6 +22,9 @@
 #include <vector>
 #include <fmt/format.h>
 
+#include "analysis_cache.hpp"
+#include "engine_process.hpp"
+#include "lichess_analysis.hpp"
 #include "board.hpp"
 #include "movegen.hpp"
 #include "pgn.hpp"
@@ -49,28 +49,12 @@ struct ParsedLog {
 constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNING";
 constexpr const char* kReplayBatch = "REPLAY_BATCH";
 constexpr const char* kBatchProgressPrefix = "BATCH_PROGRESS: ";
-constexpr int kFishnetManualRequestNodes = 1'000'000;
-constexpr int kFishnetChunkPositions = 6;
-constexpr int kDefaultReferenceNodes = kFishnetManualRequestNodes * kFishnetChunkPositions
-                                     / (kFishnetChunkPositions + 1);
-constexpr long long kDefaultMaxReplayNodes = 100'000'000;
 
 struct SearchResult {
     std::string bestmove;
     std::vector<std::string> diagnostics;
     double wdl = 0.0;
     int mate_in = 0;
-};
-
-enum class ScoreKind {
-    None,
-    Cp,
-    Mate
-};
-
-struct Score {
-    ScoreKind kind = ScoreKind::None;
-    int value = 0;
 };
 
 struct ReferenceResult {
@@ -134,32 +118,6 @@ struct AnalysisWidths {
 struct ReplayLineWidths {
     size_t fullmove = 1;
     size_t replay = 18;
-};
-
-struct EngineConfig {
-    std::string hash;
-    std::string nnue2_hash;
-};
-
-enum class ReferenceLimitKind {
-    Nodes,
-    Depth,
-    LoggedDepth
-};
-
-struct ReferenceLimit {
-    ReferenceLimitKind kind = ReferenceLimitKind::Nodes;
-    int value = kDefaultReferenceNodes;
-};
-
-struct AnalysisCache {
-    std::string key;
-    std::string provenance;
-};
-
-struct FileOptionSummary {
-    std::string details;
-    std::string nnue2_hash = "none";
 };
 
 struct GameStatus {
@@ -740,111 +698,6 @@ std::string extractSearchFen(const std::string& line) {
     return line.substr(start, end == std::string::npos ? end : end - start);
 }
 
-Score scoreForSide(Score score, int side_sign) {
-    if (score.kind != ScoreKind::None)
-        score.value *= side_sign;
-    return score;
-}
-
-int scoreAsCp(Score score) {
-    if (score.kind == ScoreKind::Cp)
-        return score.value;
-    if (score.kind == ScoreKind::Mate) {
-        int sign = score.value >= 0 ? +1 : -1;
-        return sign * (100000 - std::min(std::abs(score.value), 1000));
-    }
-    return 0;
-}
-
-int scoreAsLichessCp(Score score) {
-    if (score.kind == ScoreKind::Cp)
-        return std::clamp(score.value, -1000, 1000);
-    if (score.kind == ScoreKind::Mate)
-        return score.value >= 0 ? 1000 : -1000;
-    return 0;
-}
-
-std::string formatScore(Score score) {
-    if (score.kind == ScoreKind::Cp)
-        return score.value == 0 ? "0cp" : fmt::format("{:+}cp", score.value);
-    if (score.kind == ScoreKind::Mate) {
-        if (score.value >= 0)
-            return fmt::format("M{}", score.value);
-        return fmt::format("-M{}", std::abs(score.value));
-    }
-    return "n/a";
-}
-
-int lichessCappedCp(int cp) {
-    return std::clamp(cp, -1000, 1000);
-}
-
-double lichessWinningChances(int cp) {
-    constexpr double multiplier = -0.00368208;
-    double chances = 2.0 / (1.0 + std::exp(multiplier * lichessCappedCp(cp))) - 1.0;
-    return std::clamp(chances, -1.0, 1.0);
-}
-
-std::string lichessJudgement(int best_cp, int played_cp) {
-    double loss = lichessWinningChances(best_cp) - lichessWinningChances(played_cp);
-    if (loss >= 0.3)
-        return "blunder";
-    if (loss >= 0.2)
-        return "mistake";
-    if (loss >= 0.1)
-        return "inaccuracy";
-    return "";
-}
-
-std::string lichessMateJudgement(Score best, Score played) {
-    if (best.kind == ScoreKind::Cp
-     && played.kind == ScoreKind::Mate
-     && played.value < 0) {
-        if (best.value < -999)
-            return "inaccuracy";
-        if (best.value < -700)
-            return "mistake";
-        return "blunder";
-    }
-
-    if (best.kind == ScoreKind::Mate
-     && best.value > 0
-     && (played.kind == ScoreKind::Cp
-      || (played.kind == ScoreKind::Mate && played.value < 0))) {
-        int played_cp_or_zero = played.kind == ScoreKind::Cp ? played.value : 0;
-        if (played_cp_or_zero > 999)
-            return "inaccuracy";
-        if (played_cp_or_zero > 700)
-            return "mistake";
-        return "blunder";
-    }
-
-    return "";
-}
-
-std::string lichessJudgement(Score best, Score played) {
-    if (best.kind == ScoreKind::Cp && played.kind == ScoreKind::Cp)
-        return lichessJudgement(best.value, played.value);
-    return lichessMateJudgement(best, played);
-}
-
-double lichessAccuracy(Score best, Score played) {
-    int best_cp = scoreAsLichessCp(best);
-    int played_cp = scoreAsLichessCp(played);
-    double win_diff = std::max(0.0, lichessWinningChances(best_cp) - lichessWinningChances(played_cp)) * 50.0;
-    double accuracy = 103.1668100711649 * std::exp(-0.04354415386753951 * win_diff)
-                    - 3.166924740191411
-                    + 1.0;
-    return std::clamp(accuracy, 0.0, 100.0);
-}
-
-int lichessCpLoss(Score before_white, Score after_white, int mover_sign) {
-    int before = scoreAsLichessCp(before_white);
-    int after = scoreAsLichessCp(after_white);
-    int pov_loss = (after - before) * (mover_sign == +1 ? -1 : +1);
-    return std::max(0, pov_loss);
-}
-
 bool isReportableJudgement(const std::string& label) {
     return label == "inaccuracy" || label == "mistake" || label == "blunder";
 }
@@ -1180,139 +1033,11 @@ std::string replaceDerivedReportLines(const std::string& report,
     return output;
 }
 
-double lichessWinPercent(int cp) {
-    return 50.0 + 50.0 * lichessWinningChances(cp);
-}
-
-double lichessAccuracyFromWinPercents(double before, double after) {
-    if (after >= before)
-        return 100.0;
-
-    double win_diff = before - after;
-    double accuracy = 103.1668100711649 * std::exp(-0.04354415386753951 * win_diff)
-                    - 3.166924740191411
-                    + 1.0;
-    return std::clamp(accuracy, 0.0, 100.0);
-}
-
-std::optional<double> standardDeviation(const std::vector<double>& values) {
-    if (values.empty())
-        return std::nullopt;
-
-    double mean = 0.0;
-    for (double value : values)
-        mean += value;
-    mean /= static_cast<double>(values.size());
-
-    double variance = 0.0;
-    for (double value : values)
-        variance += (value - mean) * (value - mean);
-    variance /= static_cast<double>(values.size());
-    return std::sqrt(variance);
-}
-
-std::optional<double> weightedMean(const std::vector<std::pair<double, double>>& values) {
-    if (values.empty())
-        return std::nullopt;
-
-    double weighted_sum = 0.0;
-    double weight_sum = 0.0;
-    for (const auto& [value, weight] : values) {
-        weighted_sum += value * weight;
-        weight_sum += weight;
-    }
-
-    if (weight_sum == 0.0)
-        return std::nullopt;
-    return weighted_sum / weight_sum;
-}
-
-std::optional<double> harmonicMean(const std::vector<double>& values) {
-    if (values.empty())
-        return std::nullopt;
-
-    double denominator = 0.0;
-    for (double value : values)
-        denominator += 1.0 / std::max(1.0, value);
-
-    return static_cast<double>(values.size()) / denominator;
-}
-
-std::optional<int> lichessGameAccuracy(const AnalysisStats& stats) {
-    if (stats.side_sign == 0 || stats.ply_scores.empty())
-        return std::nullopt;
-
-    std::map<int, Score> by_ply;
-    for (const auto& [ply, score] : stats.ply_scores) {
-        if (ply > 0)
-            by_ply[ply] = score;
-    }
-    if (by_ply.empty())
-        return std::nullopt;
-
-    int max_ply = by_ply.rbegin()->first;
-    for (int ply = 1; ply <= max_ply; ++ply) {
-        if (!by_ply.contains(ply))
-            return std::nullopt;
-    }
-
-    std::vector<double> win_percents;
-    win_percents.reserve(max_ply + 1);
-    win_percents.push_back(lichessWinPercent(15));
-    for (int ply = 1; ply <= max_ply; ++ply)
-        win_percents.push_back(lichessWinPercent(scoreAsLichessCp(by_ply[ply])));
-
-    int window_size = std::clamp(max_ply / 10, 2, 8);
-    int n = (int)win_percents.size();
-    std::vector<double> weights;
-    weights.reserve(std::max(0, n - 1));
-
-    auto add_weight = [&](int start) {
-        std::vector<double> window;
-        window.reserve(window_size);
-        for (int i = start; i < std::min(start + window_size, n); ++i)
-            window.push_back(win_percents[i]);
-        auto deviation = standardDeviation(window);
-        if (deviation)
-            weights.push_back(std::clamp(*deviation, 0.5, 12.0));
-    };
-
-    int repeated = std::max(0, std::min(window_size, n) - 2);
-    for (int i = 0; i < repeated; ++i)
-        add_weight(0);
-    for (int start = 0; start + window_size <= n; ++start)
-        add_weight(start);
-
-    if ((int)weights.size() != n - 1)
-        return std::nullopt;
-
-    std::vector<std::pair<double, double>> weighted_accuracies;
-    std::vector<double> accuracies;
-    for (int i = 0; i < n - 1; ++i) {
-        int mover_sign = i % 2 == 0 ? +1 : -1;
-        if (mover_sign != stats.side_sign)
-            continue;
-
-        double before = mover_sign == +1 ? win_percents[i] : win_percents[i + 1];
-        double after = mover_sign == +1 ? win_percents[i + 1] : win_percents[i];
-        double accuracy = lichessAccuracyFromWinPercents(before, after);
-        weighted_accuracies.push_back({accuracy, weights[i]});
-        accuracies.push_back(accuracy);
-    }
-
-    auto weighted = weightedMean(weighted_accuracies);
-    auto harmonic = harmonicMean(accuracies);
-    if (!weighted || !harmonic)
-        return std::nullopt;
-
-    return std::clamp(static_cast<int>(std::lround((*weighted + *harmonic) / 2.0)), 0, 100);
-}
-
 std::string formatAccuracyReport(const AnalysisStats& stats) {
     if (stats.moves == 0)
         return "";
 
-    int accuracy = lichessGameAccuracy(stats)
+    int accuracy = lichessGameAccuracy(stats.side_sign, stats.ply_scores)
         .value_or(std::clamp(static_cast<int>(std::lround(stats.accuracy / stats.moves)), 0, 100));
     int avg_loss = static_cast<int>(std::lround(static_cast<double>(stats.cp_loss) / stats.moves));
     return fmt::format("{:<11} {}%\n{:<11} {}cp\n",
@@ -1381,413 +1106,12 @@ std::filesystem::path tempOutputPath(size_t index) {
     return directory / fmt::format("replay-job-{}-{}.out", getpid(), index);
 }
 
-void hashAppend(uint64_t& hash, std::string_view data) {
-    constexpr uint64_t prime = 1099511628211ULL;
-    for (unsigned char ch : data) {
-        hash ^= ch;
-        hash *= prime;
-    }
-}
-
-std::string hashString(std::string_view data, size_t length = 12) {
-    uint64_t hash = 1469598103934665603ULL;
-    hashAppend(hash, data);
-    std::string hex = fmt::format("{:016x}", hash);
-    return hex.substr(0, std::min(length, hex.size()));
-}
-
-std::string hashFileContent(const std::filesystem::path& path, size_t length = 12) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open())
-        return "missing";
-
-    uint64_t hash = 1469598103934665603ULL;
-    char buffer[65536];
-    while (file) {
-        file.read(buffer, sizeof(buffer));
-        hashAppend(hash, std::string_view(buffer, (size_t)file.gcount()));
-    }
-
-    std::string hex = fmt::format("{:016x}", hash);
-    return hex.substr(0, std::min(length, hex.size()));
-}
-
-std::string joinLines(const std::vector<std::string>& lines) {
-    std::string text;
-    for (const auto& line : lines)
-        text += line + "\n";
-    return text;
-}
-
-std::filesystem::path expandPath(std::string value) {
-    value = trim(value);
-    if (value.size() >= 2
-     && ((value.front() == '"' && value.back() == '"')
-      || (value.front() == '\'' && value.back() == '\'')))
-        value = value.substr(1, value.size() - 2);
-
-    if (startsWith(value, "~/")) {
-        const char* home = std::getenv("HOME");
-        if (home)
-            value = std::string(home) + value.substr(1);
-    }
-
-    std::filesystem::path path = value;
-    std::error_code ec;
-    if (std::filesystem::exists(path, ec)) {
-        auto canonical = std::filesystem::weakly_canonical(path, ec);
-        if (!ec)
-            return canonical;
-    }
-
-    return path;
-}
-
-bool isFileOptionName(const std::string& name) {
-    std::string option = lower(name);
-    return option.find("nnue") != std::string::npos
-        || option.find("file") != std::string::npos;
-}
-
-std::optional<std::pair<std::string, std::string>> parseSetoptionValue(const std::string& line) {
-    if (!startsWith(line, "setoption name "))
-        return std::nullopt;
-
-    std::string rest = line.substr(15);
-    size_t value_pos = rest.find(" value ");
-    if (value_pos == std::string::npos)
-        return std::pair{trim(rest), std::string{}};
-
-    return std::pair{trim(rest.substr(0, value_pos)), trim(rest.substr(value_pos + 7))};
-}
-
-std::optional<std::pair<std::string, std::string>> parseUciDefaultValue(const std::string& line) {
-    if (!startsWith(line, "option name "))
-        return std::nullopt;
-
-    size_t type_pos = line.find(" type ", 12);
-    if (type_pos == std::string::npos)
-        return std::nullopt;
-
-    std::string name = trim(line.substr(12, type_pos - 12));
-    size_t default_pos = line.find(" default ", type_pos + 6);
-    if (default_pos == std::string::npos)
-        return std::pair{name, std::string{}};
-
-    return std::pair{name, trim(line.substr(default_pos + 9))};
-}
-
-std::optional<std::string> enyoVersionIdentity(const std::string& line) {
-    std::string marker = "Enyo Release ";
-    size_t start = line.find(marker);
-    if (start == std::string::npos)
-        return std::nullopt;
-
-    start += marker.size();
-    size_t end = line.find(" built ", start);
-    std::string version = trim(line.substr(start, end == std::string::npos ? end : end - start));
-    if (version.empty())
-        return std::nullopt;
-    return "id enyo-version " + version;
-}
-
-std::string cacheUciText(const std::string& uci_text) {
-    std::istringstream input(uci_text);
-    std::string output;
-    std::string line;
-    std::optional<std::string> enyo_version;
-    while (std::getline(input, line)) {
-        if (startsWith(line, "Using config file:"))
-            continue;
-
-        auto version = enyoVersionIdentity(line);
-        if (version)
-            enyo_version = version;
-
-        auto option = parseUciDefaultValue(line);
-        if (option && isFileOptionName(option->first)) {
-            output += fmt::format("option name {} file-option\n", option->first);
-            continue;
-        }
-
-        output += line + "\n";
-    }
-
-    if (enyo_version)
-        return *enyo_version + "\n";
-
-    return output;
-}
-
-void addFileOptionDetail(std::string& details,
-                         std::unordered_map<std::string, std::string>& file_hashes,
-                         std::string& nnue2_hash,
-                         const std::string& name,
-                         const std::string& value) {
-    if (!isFileOptionName(name) || trim(value).empty())
-        return;
-
-    auto path = expandPath(value);
-    std::error_code ec;
-    std::string option = lower(name);
-    details += name;
-    if (std::filesystem::is_regular_file(path, ec)) {
-        std::string key = path.string();
-        if (!file_hashes.contains(key))
-            file_hashes[key] = hashFileContent(path, 16);
-        details += fmt::format(" hash={}", file_hashes[key]);
-        if (option.find("nnue2") != std::string::npos)
-            nnue2_hash = file_hashes[key].substr(0, 8);
-    } else {
-        details += fmt::format(" hash=missing value={}", path.filename().string());
-        if (option.find("nnue2") != std::string::npos)
-            nnue2_hash = "missing";
-    }
-    details += "\n";
-}
-
-FileOptionSummary fileOptionDetails(const std::string& uci_text,
-                                    const std::vector<std::string>& setoptions) {
-    std::unordered_map<std::string, std::string> file_hashes;
-    FileOptionSummary summary;
-
-    std::istringstream uci_lines(uci_text);
-    std::string line;
-    while (std::getline(uci_lines, line)) {
-        auto option = parseUciDefaultValue(line);
-        if (option)
-            addFileOptionDetail(summary.details, file_hashes, summary.nnue2_hash,
-                                option->first, option->second);
-    }
-
-    for (const auto& setoption : setoptions) {
-        auto option = parseSetoptionValue(setoption);
-        if (option)
-            addFileOptionDetail(summary.details, file_hashes, summary.nnue2_hash,
-                                option->first, option->second);
-    }
-
-    return summary;
-}
-
 std::vector<std::string> effectiveSetoptions(const std::vector<std::string>& log_setoptions,
                                              int threads) {
     std::vector<std::string> setoptions = log_setoptions;
     if (threads > 0)
         setoptions.push_back(fmt::format("setoption name Threads value {}", threads));
     return setoptions;
-}
-
-class EngineProcess {
-    FILE* engine_in = nullptr;
-    FILE* engine_out = nullptr;
-    pid_t pid = -1;
-    bool verbose = false;
-
-public:
-    EngineProcess(const std::string& engine_path, bool verbose_output)
-        : verbose(verbose_output) {
-        int pipe_to_engine[2];
-        int pipe_from_engine[2];
-
-        if (pipe(pipe_to_engine) == -1 || pipe(pipe_from_engine) == -1)
-            throw std::runtime_error("failed to create pipes");
-
-        pid = fork();
-        if (pid == -1)
-            throw std::runtime_error("failed to fork");
-
-        if (pid == 0) {
-            dup2(pipe_to_engine[0], STDIN_FILENO);
-            dup2(pipe_from_engine[1], STDOUT_FILENO);
-            if (!verbose) {
-                int devnull = open("/dev/null", O_WRONLY);
-                if (devnull >= 0) {
-                    dup2(devnull, STDERR_FILENO);
-                    close(devnull);
-                }
-            }
-            signal(SIGPIPE, SIG_DFL);
-
-            close(pipe_to_engine[0]);
-            close(pipe_to_engine[1]);
-            close(pipe_from_engine[0]);
-            close(pipe_from_engine[1]);
-
-            execlp(engine_path.c_str(), engine_path.c_str(), nullptr);
-            exit(1);
-        }
-
-        close(pipe_to_engine[0]);
-        close(pipe_from_engine[1]);
-
-        engine_in = fdopen(pipe_to_engine[1], "w");
-        engine_out = fdopen(pipe_from_engine[0], "r");
-
-        if (!engine_in || !engine_out)
-            throw std::runtime_error("failed to open engine streams");
-
-        setbuf(engine_in, nullptr);
-        setbuf(engine_out, nullptr);
-    }
-
-    ~EngineProcess() {
-        if (engine_in) {
-            fprintf(engine_in, "quit\n");
-            fclose(engine_in);
-        }
-        if (engine_out)
-            fclose(engine_out);
-        if (pid > 0)
-            waitpid(pid, nullptr, 0);
-    }
-
-    void send(const std::string& cmd) {
-        if (verbose)
-            fmt::print("uci:> {}\n", cmd);
-        if (fprintf(engine_in, "%s\n", cmd.c_str()) < 0 || fflush(engine_in) == EOF)
-            throw std::runtime_error(fmt::format("engine stopped while sending command: {}", cmd));
-    }
-
-    bool waitReadable(int timeout_ms) {
-        int fd = fileno(engine_out);
-        struct pollfd pfd{fd, POLLIN, 0};
-        int rc = poll(&pfd, 1, timeout_ms);
-        return rc > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR));
-    }
-
-    std::optional<std::string> readLine(bool print_diagnostics = true) {
-        char buffer[8192];
-        if (!fgets(buffer, sizeof(buffer), engine_out))
-            return std::nullopt;
-
-        std::string line(buffer);
-        if (!line.empty() && line.back() == '\n')
-            line.pop_back();
-        if (verbose)
-            fmt::print("{}\n", line);
-        else if (print_diagnostics && isDiagnosticLine(line))
-            fmt::print(stderr, "{}\n", formatDiagnosticLine(line, false, false));
-        return line;
-    }
-
-    bool hasExited() {
-        if (pid <= 0)
-            return true;
-
-        int status = 0;
-        pid_t rc = waitpid(pid, &status, WNOHANG);
-        if (rc == pid) {
-            pid = -1;
-            return true;
-        }
-        return false;
-    }
-};
-
-void waitForToken(EngineProcess& engine, const std::string& token) {
-    while (true) {
-        if (!engine.waitReadable(30000)) {
-            if (engine.hasExited())
-                throw std::runtime_error(fmt::format("engine exited while waiting for {}", token));
-            throw std::runtime_error(fmt::format("timed out waiting for {}", token));
-        }
-
-        auto line = engine.readLine();
-        if (!line)
-            throw std::runtime_error(fmt::format("engine closed stdout while waiting for {}", token));
-        if (*line == token)
-            return;
-    }
-}
-
-EngineConfig probeEngineConfig(const std::string& engine_path,
-                               const std::vector<std::string>& setoptions) {
-    EngineProcess engine(engine_path, false);
-    engine.send("uci");
-
-    std::string uci_text;
-    while (true) {
-        if (!engine.waitReadable(30000)) {
-            if (engine.hasExited())
-                throw std::runtime_error("engine exited while waiting for uciok");
-            throw std::runtime_error("timed out waiting for uciok");
-        }
-
-        auto line = engine.readLine();
-        if (!line)
-            throw std::runtime_error("engine closed stdout while waiting for uciok");
-        uci_text += *line + "\n";
-        if (*line == "uciok")
-            break;
-    }
-
-    std::string setoption_text = joinLines(setoptions);
-    auto file_options = fileOptionDetails(uci_text, setoptions);
-    std::string identity_text = cacheUciText(uci_text);
-    std::string config_hash = hashString(fmt::format(
-        "uci={}\nsetoptions={}\nfiles={}\n",
-        identity_text,
-        setoption_text,
-        file_options.details));
-
-    return {
-        config_hash,
-        file_options.nnue2_hash
-    };
-}
-
-ReferenceLimit resolveReferenceLimit(const ReferenceLimit& limit, int logged_depth) {
-    if (limit.kind != ReferenceLimitKind::LoggedDepth)
-        return limit;
-
-    return {ReferenceLimitKind::Depth, std::max(1, logged_depth)};
-}
-
-std::string referenceLimitName(const ReferenceLimit& limit) {
-    switch (limit.kind) {
-    case ReferenceLimitKind::Nodes:
-        return fmt::format("nodes{}", limit.value);
-    case ReferenceLimitKind::Depth:
-        return fmt::format("depth{}", limit.value);
-    case ReferenceLimitKind::LoggedDepth:
-        return "log-depth";
-    }
-
-    return "unknown";
-}
-
-std::string referenceLimitDisplay(const ReferenceLimit& limit) {
-    switch (limit.kind) {
-    case ReferenceLimitKind::Nodes:
-        return fmt::format("ref-nodes {}", limit.value);
-    case ReferenceLimitKind::Depth:
-        return fmt::format("ref-depth {}", limit.value);
-    case ReferenceLimitKind::LoggedDepth:
-        return "ref-depth log";
-    }
-
-    return "ref-limit unknown";
-}
-
-std::string analysisModeName(bool time_mode, const ReferenceLimit& reference_limit, const std::string& analysis_target) {
-    std::string mode = analysis_target == "log"
-        ? "log"
-        : (time_mode ? "time" : "replay_nodes");
-    if (reference_limit.kind == ReferenceLimitKind::Nodes && reference_limit.value == kDefaultReferenceNodes)
-        return mode;
-    return fmt::format("{}_{}", mode, referenceLimitName(reference_limit));
-}
-
-std::filesystem::path analysisPath(const std::filesystem::path& logfile,
-                                   const std::string& analysis_key,
-                                   const std::string& analysis_target) {
-    if (analysis_target == "log")
-        return logfile.parent_path() / fmt::format("{}.analysis", logfile.stem().string());
-
-    return logfile.parent_path() / fmt::format("{}.{}_analysis",
-                                               logfile.stem().string(),
-                                               analysis_key);
 }
 
 std::string readFile(const std::filesystem::path& path) {
@@ -1806,78 +1130,6 @@ void writeFile(const std::filesystem::path& path, const std::string& text) {
         throw std::runtime_error(fmt::format("failed to write {}", path.string()));
 
     file << text;
-}
-
-AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
-                                 const EngineConfig& candidate,
-                                 const EngineConfig& reference,
-                                 bool time_mode,
-                                 long long max_replay_nodes,
-                                 const ReferenceLimit& reference_limit,
-                                 const std::string& analysis_target) {
-    auto pgn_path = logfile;
-    pgn_path.replace_extension(".pgn");
-
-    std::string log_hash = hashFileContent(logfile);
-    std::string pgn_hash = std::filesystem::exists(pgn_path) ? hashFileContent(pgn_path) : "none";
-    std::string input_hash = hashString(fmt::format("log={}\npgn={}\n", log_hash, pgn_hash));
-    std::string mode = analysisModeName(time_mode, reference_limit, analysis_target);
-    std::string mode_text = fmt::format("mode={}\ntime={}\ntarget={}\n",
-                                        mode, time_mode, analysis_target);
-    if (analysis_target != "log" && !time_mode && max_replay_nodes != kDefaultMaxReplayNodes)
-        mode_text += fmt::format("replay-node-cap={}\n", max_replay_nodes);
-    mode_text += fmt::format("ref-limit={}\nref-state=fresh\n",
-                             referenceLimitName(reference_limit));
-    std::string mode_hash = hashString(mode_text);
-
-    std::string key = hashString(fmt::format(
-        "replay-cache-v24\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
-        candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
-
-    std::string provenance = fmt::format(
-        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | {} | ref-state fresh | nnue2 {}",
-        key,
-        candidate.hash,
-        reference.hash,
-        input_hash,
-        analysis_target,
-        referenceLimitDisplay(reference_limit),
-        candidate.nnue2_hash);
-    if (analysis_target != "log" && !time_mode) {
-        provenance += " | candidate nodes";
-        if (max_replay_nodes != kDefaultMaxReplayNodes)
-            provenance += fmt::format(" max {}", max_replay_nodes);
-    }
-
-    return {key, provenance};
-}
-
-void initializeEngine(EngineProcess& engine,
-                      const std::vector<std::string>& setoptions,
-                      int threads) {
-    engine.send("uci");
-    waitForToken(engine, "uciok");
-
-    for (const auto& option : setoptions)
-        engine.send(option);
-
-    if (threads > 0)
-        engine.send(fmt::format("setoption name Threads value {}", threads));
-
-    engine.send("ucinewgame");
-    engine.send("isready");
-    waitForToken(engine, "readyok");
-}
-
-void initializeReference(EngineProcess& engine) {
-    engine.send("uci");
-    waitForToken(engine, "uciok");
-}
-
-void resetReference(EngineProcess& engine) {
-    engine.send("ucinewgame");
-    engine.send("isready");
-    waitForToken(engine, "readyok");
 }
 
 void updateReferenceScore(ReferenceResult& result, const std::string& line, int stm_sign) {
@@ -2048,11 +1300,11 @@ ReferenceLimit sequenceAnalysisLimit(const ReferenceLimit& limit) {
     return limit;
 }
 
-std::map<int, PositionEvaluation> analyzeFishnetPositionSequence(EngineProcess& reference,
-                                                                 const PositionSequence& sequence,
-                                                                 const ReferenceLimit& reference_limit,
-                                                                 bool progress) {
-    std::map<int, PositionEvaluation> evaluations;
+std::unordered_map<int, PositionEvaluation> analyzeFishnetPositionSequence(EngineProcess& reference,
+                                                                          const PositionSequence& sequence,
+                                                                          const ReferenceLimit& reference_limit,
+                                                                          bool progress) {
+    std::unordered_map<int, PositionEvaluation> evaluations;
     ReferenceLimit resolved_limit = sequenceAnalysisLimit(reference_limit);
     int max_ply = static_cast<int>(sequence.moves.size());
     if (max_ply < 0)

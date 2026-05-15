@@ -27,7 +27,12 @@ target_link_libraries(enyo_chess PUBLIC
     nlohmann_json::nlohmann_json
 )
 
-add_executable(replay replay.cpp)
+add_executable(replay
+    analysis_cache.cpp
+    engine_process.cpp
+    lichess_analysis.cpp
+    replay.cpp
+)
 set_target_properties(replay PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON

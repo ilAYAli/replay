@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <fcntl.h>
@@ -48,8 +49,10 @@ struct ParsedLog {
 constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNING";
 constexpr const char* kReplayBatch = "REPLAY_BATCH";
 constexpr const char* kBatchProgressPrefix = "BATCH_PROGRESS: ";
-constexpr int kDefaultReferenceNodes = 1'000'000;
-constexpr int kConfirmReferenceNodes = 2'000'000;
+constexpr int kFishnetManualRequestNodes = 1'000'000;
+constexpr int kFishnetChunkPositions = 6;
+constexpr int kDefaultReferenceNodes = kFishnetManualRequestNodes * kFishnetChunkPositions
+                                     / (kFishnetChunkPositions + 1);
 constexpr long long kDefaultMaxReplayNodes = 100'000'000;
 
 struct SearchResult {
@@ -76,6 +79,17 @@ struct ReferenceResult {
     bool has_score = false;
 };
 
+struct PositionSequence {
+    std::string root;
+    std::vector<std::string> moves;
+};
+
+struct PositionEvaluation {
+    ReferenceResult result;
+    bool ok = false;
+    std::string error;
+};
+
 struct MoveValidation {
     bool ok = false;
     bool reference_best = false;
@@ -84,8 +98,12 @@ struct MoveValidation {
     std::string bestmove;
     std::string best_display;
     std::string best_score;
+    Score before_score_white;
+    Score after_score_white;
     int cp_loss = 0;
     double accuracy = 100.0;
+    int ply_before = 0;
+    int ply_after = 0;
 };
 
 struct AnalysisEntry {
@@ -103,6 +121,8 @@ struct AnalysisStats {
     int moves = 0;
     long long cp_loss = 0;
     double accuracy = 0.0;
+    int side_sign = 0;
+    std::vector<std::pair<int, Score>> ply_scores;
 };
 
 struct AnalysisWidths {
@@ -420,6 +440,12 @@ std::string sideToMoveName(const std::string& position) {
     return sideToMoveSign(position) == +1 ? "White" : "Black";
 }
 
+int plyBeforeMove(const std::string& position, int fullmove) {
+    if (sideToMoveSign(position) == +1)
+        return std::max(0, (fullmove - 1) * 2);
+    return std::max(0, fullmove * 2 - 1);
+}
+
 bool applyUciMove(enyo::Board& board, const std::string& move) {
     auto resolved = enyo::uci_to_move(board, move);
     if (!resolved)
@@ -502,6 +528,118 @@ std::optional<enyo::Board> boardFromPosition(const std::string& position) {
     }
 }
 
+std::optional<std::string> positionAfterMove(const std::string& position,
+                                             const std::string& move) {
+    auto board = boardFromPosition(position);
+    if (!board)
+        return std::nullopt;
+    if (!applyUciMove(*board, move))
+        return std::nullopt;
+    if (startsWith(position, "position startpos")
+     || startsWith(position, "position fen ")) {
+        if (position.find(" moves ") != std::string::npos)
+            return position + " " + move;
+        return position + " moves " + move;
+    }
+    return fmt::format("position fen {}", board->fen());
+}
+
+std::vector<std::string> splitMoves(std::string_view text) {
+    std::vector<std::string> moves;
+    std::istringstream stream(std::string{text});
+    std::string move;
+    while (stream >> move)
+        moves.push_back(move);
+    return moves;
+}
+
+std::optional<PositionSequence> positionSequenceFromPosition(const std::string& position) {
+    if (!startsWith(position, "position startpos")
+     && !startsWith(position, "position fen "))
+        return std::nullopt;
+
+    size_t moves_pos = position.find(" moves ");
+    if (moves_pos == std::string::npos)
+        return PositionSequence{position, {}};
+
+    return PositionSequence{
+        position.substr(0, moves_pos),
+        splitMoves(position.substr(moves_pos + 7))
+    };
+}
+
+std::string positionFromSequence(const PositionSequence& sequence, int ply) {
+    ply = std::clamp(ply, 0, static_cast<int>(sequence.moves.size()));
+    std::string position = sequence.root;
+    if (ply > 0) {
+        position += " moves";
+        for (int i = 0; i < ply; ++i)
+            position += " " + sequence.moves[i];
+    }
+    return position;
+}
+
+std::vector<std::string> immediateCheckmateMoves(enyo::Board board);
+
+std::optional<PositionSequence> reconstructedSequenceFromEntries(const std::vector<LogEntry>& entries) {
+    if (entries.empty())
+        return std::nullopt;
+
+    auto sequence = positionSequenceFromPosition(entries.back().position);
+    if (!sequence)
+        return std::nullopt;
+
+    const std::string& move = entries.back().expected;
+    if (!move.empty() && move != "(none)") {
+        auto board = boardFromPosition(entries.back().position);
+        if (!board || !applyUciMove(*board, move))
+            return std::nullopt;
+        sequence->moves.push_back(move);
+    }
+
+    auto final_board = boardFromPosition(positionFromSequence(*sequence,
+                                                              static_cast<int>(sequence->moves.size())));
+    if (final_board) {
+        auto mates = immediateCheckmateMoves(*final_board);
+        std::sort(mates.begin(), mates.end());
+        if (!mates.empty())
+            sequence->moves.push_back(mates.front());
+    }
+
+    return sequence;
+}
+
+std::optional<LogEntry> logEntryFromSequenceMove(const PositionSequence& sequence, int ply_before) {
+    if (ply_before < 0 || ply_before >= static_cast<int>(sequence.moves.size()))
+        return std::nullopt;
+
+    std::string position = positionFromSequence(sequence, ply_before);
+    auto board = boardFromPosition(position);
+    if (!board)
+        return std::nullopt;
+
+    LogEntry entry;
+    entry.position = position;
+    entry.expected = sequence.moves[ply_before];
+    entry.fen = board->fen();
+    entry.fullmove = fullmoveFromPosition(position);
+    entry.depth = 1;
+    return entry;
+}
+
+std::vector<LogEntry> sideEntriesFromSequence(const PositionSequence& sequence, int side_sign) {
+    std::vector<LogEntry> entries;
+    for (int ply = 0; ply < static_cast<int>(sequence.moves.size()); ++ply) {
+        std::string position = positionFromSequence(sequence, ply);
+        if (sideToMoveSign(position) != side_sign)
+            continue;
+        auto entry = logEntryFromSequenceMove(sequence, ply);
+        if (entry)
+            entries.push_back(*entry);
+    }
+    return entries;
+}
+
 std::optional<GameStatus> terminalStatusAfterMove(const LogEntry& entry) {
     auto board = boardFromPosition(entry.position);
     if (!board)
@@ -527,6 +665,26 @@ bool terminalAfterMove(const LogEntry& entry) {
     return terminalStatusAfterMove(entry).has_value();
 }
 
+std::vector<std::string> immediateCheckmateMoves(enyo::Board board) {
+    std::vector<std::string> mates;
+    if (board.side == enyo::white) {
+        for (const auto& move : generate_legal_moves<enyo::white, false, false>(board)) {
+            enyo::Board next = board;
+            apply_move<enyo::white>(next, move);
+            if (!hasLegalMoves(next) && isInCheck(next))
+                mates.push_back(fmt::format("{}", move));
+        }
+    } else {
+        for (const auto& move : generate_legal_moves<enyo::black, false, false>(board)) {
+            enyo::Board next = board;
+            apply_move<enyo::black>(next, move);
+            if (!hasLegalMoves(next) && isInCheck(next))
+                mates.push_back(fmt::format("{}", move));
+        }
+    }
+    return mates;
+}
+
 bool opponentHasImmediateCheckmateAfterMove(const LogEntry& entry) {
     auto board = boardFromPosition(entry.position);
     if (!board)
@@ -534,23 +692,7 @@ bool opponentHasImmediateCheckmateAfterMove(const LogEntry& entry) {
     if (!applyUciMove(*board, entry.expected))
         return false;
 
-    if (board->side == enyo::white) {
-        for (const auto& move : generate_legal_moves<enyo::white, false, false>(*board)) {
-            enyo::Board next = *board;
-            apply_move<enyo::white>(next, move);
-            if (!hasLegalMoves(next) && isInCheck(next))
-                return true;
-        }
-    } else {
-        for (const auto& move : generate_legal_moves<enyo::black, false, false>(*board)) {
-            enyo::Board next = *board;
-            apply_move<enyo::black>(next, move);
-            if (!hasLegalMoves(next) && isInCheck(next))
-                return true;
-        }
-    }
-
-    return false;
+    return !immediateCheckmateMoves(*board).empty();
 }
 
 std::string algebraForMove(const std::string& position, const std::string& move) {
@@ -611,6 +753,14 @@ int scoreAsCp(Score score) {
         int sign = score.value >= 0 ? +1 : -1;
         return sign * (100000 - std::min(std::abs(score.value), 1000));
     }
+    return 0;
+}
+
+int scoreAsLichessCp(Score score) {
+    if (score.kind == ScoreKind::Cp)
+        return std::clamp(score.value, -1000, 1000);
+    if (score.kind == ScoreKind::Mate)
+        return score.value >= 0 ? 1000 : -1000;
     return 0;
 }
 
@@ -679,11 +829,20 @@ std::string lichessJudgement(Score best, Score played) {
 }
 
 double lichessAccuracy(Score best, Score played) {
-    int best_cp = scoreAsCp(best);
-    int played_cp = scoreAsCp(played);
+    int best_cp = scoreAsLichessCp(best);
+    int played_cp = scoreAsLichessCp(played);
     double win_diff = std::max(0.0, lichessWinningChances(best_cp) - lichessWinningChances(played_cp)) * 50.0;
-    double accuracy = 103.1668100711649 * std::exp(-0.04354415386753951 * win_diff) - 3.166924740191411;
+    double accuracy = 103.1668100711649 * std::exp(-0.04354415386753951 * win_diff)
+                    - 3.166924740191411
+                    + 1.0;
     return std::clamp(accuracy, 0.0, 100.0);
+}
+
+int lichessCpLoss(Score before_white, Score after_white, int mover_sign) {
+    int before = scoreAsLichessCp(before_white);
+    int after = scoreAsLichessCp(after_white);
+    int pov_loss = (after - before) * (mover_sign == +1 ? -1 : +1);
+    return std::max(0, pov_loss);
 }
 
 bool isReportableJudgement(const std::string& label) {
@@ -1021,11 +1180,140 @@ std::string replaceDerivedReportLines(const std::string& report,
     return output;
 }
 
+double lichessWinPercent(int cp) {
+    return 50.0 + 50.0 * lichessWinningChances(cp);
+}
+
+double lichessAccuracyFromWinPercents(double before, double after) {
+    if (after >= before)
+        return 100.0;
+
+    double win_diff = before - after;
+    double accuracy = 103.1668100711649 * std::exp(-0.04354415386753951 * win_diff)
+                    - 3.166924740191411
+                    + 1.0;
+    return std::clamp(accuracy, 0.0, 100.0);
+}
+
+std::optional<double> standardDeviation(const std::vector<double>& values) {
+    if (values.empty())
+        return std::nullopt;
+
+    double mean = 0.0;
+    for (double value : values)
+        mean += value;
+    mean /= static_cast<double>(values.size());
+
+    double variance = 0.0;
+    for (double value : values)
+        variance += (value - mean) * (value - mean);
+    variance /= static_cast<double>(values.size());
+    return std::sqrt(variance);
+}
+
+std::optional<double> weightedMean(const std::vector<std::pair<double, double>>& values) {
+    if (values.empty())
+        return std::nullopt;
+
+    double weighted_sum = 0.0;
+    double weight_sum = 0.0;
+    for (const auto& [value, weight] : values) {
+        weighted_sum += value * weight;
+        weight_sum += weight;
+    }
+
+    if (weight_sum == 0.0)
+        return std::nullopt;
+    return weighted_sum / weight_sum;
+}
+
+std::optional<double> harmonicMean(const std::vector<double>& values) {
+    if (values.empty())
+        return std::nullopt;
+
+    double denominator = 0.0;
+    for (double value : values)
+        denominator += 1.0 / std::max(1.0, value);
+
+    return static_cast<double>(values.size()) / denominator;
+}
+
+std::optional<int> lichessGameAccuracy(const AnalysisStats& stats) {
+    if (stats.side_sign == 0 || stats.ply_scores.empty())
+        return std::nullopt;
+
+    std::map<int, Score> by_ply;
+    for (const auto& [ply, score] : stats.ply_scores) {
+        if (ply > 0)
+            by_ply[ply] = score;
+    }
+    if (by_ply.empty())
+        return std::nullopt;
+
+    int max_ply = by_ply.rbegin()->first;
+    for (int ply = 1; ply <= max_ply; ++ply) {
+        if (!by_ply.contains(ply))
+            return std::nullopt;
+    }
+
+    std::vector<double> win_percents;
+    win_percents.reserve(max_ply + 1);
+    win_percents.push_back(lichessWinPercent(15));
+    for (int ply = 1; ply <= max_ply; ++ply)
+        win_percents.push_back(lichessWinPercent(scoreAsLichessCp(by_ply[ply])));
+
+    int window_size = std::clamp(max_ply / 10, 2, 8);
+    int n = (int)win_percents.size();
+    std::vector<double> weights;
+    weights.reserve(std::max(0, n - 1));
+
+    auto add_weight = [&](int start) {
+        std::vector<double> window;
+        window.reserve(window_size);
+        for (int i = start; i < std::min(start + window_size, n); ++i)
+            window.push_back(win_percents[i]);
+        auto deviation = standardDeviation(window);
+        if (deviation)
+            weights.push_back(std::clamp(*deviation, 0.5, 12.0));
+    };
+
+    int repeated = std::max(0, std::min(window_size, n) - 2);
+    for (int i = 0; i < repeated; ++i)
+        add_weight(0);
+    for (int start = 0; start + window_size <= n; ++start)
+        add_weight(start);
+
+    if ((int)weights.size() != n - 1)
+        return std::nullopt;
+
+    std::vector<std::pair<double, double>> weighted_accuracies;
+    std::vector<double> accuracies;
+    for (int i = 0; i < n - 1; ++i) {
+        int mover_sign = i % 2 == 0 ? +1 : -1;
+        if (mover_sign != stats.side_sign)
+            continue;
+
+        double before = mover_sign == +1 ? win_percents[i] : win_percents[i + 1];
+        double after = mover_sign == +1 ? win_percents[i + 1] : win_percents[i];
+        double accuracy = lichessAccuracyFromWinPercents(before, after);
+        weighted_accuracies.push_back({accuracy, weights[i]});
+        accuracies.push_back(accuracy);
+    }
+
+    auto weighted = weightedMean(weighted_accuracies);
+    auto harmonic = harmonicMean(accuracies);
+    if (!weighted || !harmonic)
+        return std::nullopt;
+
+    return std::clamp(static_cast<int>(std::lround((*weighted + *harmonic) / 2.0)), 0, 100);
+}
+
 std::string formatAccuracyReport(const AnalysisStats& stats) {
     if (stats.moves == 0)
         return "";
 
-    int accuracy = std::clamp(static_cast<int>(std::lround(stats.accuracy / stats.moves)), 0, 100);
+    int accuracy = lichessGameAccuracy(stats)
+        .value_or(std::clamp(static_cast<int>(std::lround(stats.accuracy / stats.moves)), 0, 100));
     int avg_loss = static_cast<int>(std::lround(static_cast<double>(stats.cp_loss) / stats.moves));
     return fmt::format("{:<11} {}%\n{:<11} {}cp\n",
                        "accuracy:", accuracy,
@@ -1482,18 +1770,6 @@ std::string referenceLimitDisplay(const ReferenceLimit& limit) {
     return "ref-limit unknown";
 }
 
-bool shouldConfirmReportableMoves(const ReferenceLimit& limit, bool reference_limit_explicit) {
-    return !reference_limit_explicit
-        && limit.kind == ReferenceLimitKind::Nodes
-        && limit.value == kDefaultReferenceNodes;
-}
-
-std::string confirmationDisplay(bool confirm_reportable) {
-    if (!confirm_reportable)
-        return "confirm none";
-    return fmt::format("confirm-nodes {}", kConfirmReferenceNodes);
-}
-
 std::string analysisModeName(bool time_mode, const ReferenceLimit& reference_limit, const std::string& analysis_target) {
     std::string mode = analysis_target == "log"
         ? "log"
@@ -1538,8 +1814,7 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                  bool time_mode,
                                  long long max_replay_nodes,
                                  const ReferenceLimit& reference_limit,
-                                 const std::string& analysis_target,
-                                 bool confirm_reportable) {
+                                 const std::string& analysis_target) {
     auto pgn_path = logfile;
     pgn_path.replace_extension(".pgn");
 
@@ -1551,24 +1826,22 @@ AnalysisCache buildAnalysisCache(const std::filesystem::path& logfile,
                                         mode, time_mode, analysis_target);
     if (analysis_target != "log" && !time_mode && max_replay_nodes != kDefaultMaxReplayNodes)
         mode_text += fmt::format("replay-node-cap={}\n", max_replay_nodes);
-    mode_text += fmt::format("ref-limit={}\nref-state=fresh\nconfirm={}\n",
-                             referenceLimitName(reference_limit),
-                             confirmationDisplay(confirm_reportable));
+    mode_text += fmt::format("ref-limit={}\nref-state=fresh\n",
+                             referenceLimitName(reference_limit));
     std::string mode_hash = hashString(mode_text);
 
     std::string key = hashString(fmt::format(
-        "replay-cache-v17\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
+        "replay-cache-v24\ncandidate={}\nreference={}\nlog={}\npgn={}\nmode={}\n",
         candidate.hash, reference.hash, log_hash, pgn_hash, mode_hash));
 
     std::string provenance = fmt::format(
-        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | {} | {} | ref-state fresh | nnue2 {}",
+        "analysis-key {} | candidate cfg {} | reference cfg {} | log {} | target {} | {} | ref-state fresh | nnue2 {}",
         key,
         candidate.hash,
         reference.hash,
         input_hash,
         analysis_target,
         referenceLimitDisplay(reference_limit),
-        confirmationDisplay(confirm_reportable),
         candidate.nnue2_hash);
     if (analysis_target != "log" && !time_mode) {
         provenance += " | candidate nodes";
@@ -1635,14 +1908,16 @@ ReferenceResult referenceSearch(EngineProcess& engine,
                                 const ReferenceLimit& limit,
                                 bool progress,
                                 const std::string& progress_text,
-                                const std::string& search_move = "") {
+                                const std::string& search_move = "",
+                                bool reset = true) {
     ReferenceResult result;
     int stm_sign = sideToMoveSign(position);
     int target = std::max(1, limit.value);
     int last_reported_depth = -1;
     long long last_reported_nodes = -1;
 
-    resetReference(engine);
+    if (reset)
+        resetReference(engine);
 
     if (progress) {
         if (limit.kind == ReferenceLimitKind::Nodes)
@@ -1703,7 +1978,8 @@ MoveValidation validateMove(EngineProcess& reference,
                             int fullmove,
                             int display_total,
                             bool progress,
-                            std::string_view progress_verb = "analyzing") {
+                            std::string_view progress_verb = "analyzing",
+                            bool reset_reference = true) {
     MoveValidation validation;
     if (played_move.empty() || played_move == "(none)") {
         validation.error = "no played move";
@@ -1716,7 +1992,9 @@ MoveValidation validateMove(EngineProcess& reference,
                                           resolved_limit,
                                           progress,
                                           fmt::format("{} [{}/{}] reference-best",
-                                                      progress_verb, fullmove, display_total));
+                                                      progress_verb, fullmove, display_total),
+                                          "",
+                                          reset_reference);
     if (!best.has_score) {
         validation.error = "reference returned no score";
         return validation;
@@ -1724,68 +2002,160 @@ MoveValidation validateMove(EngineProcess& reference,
 
     validation.bestmove = best.bestmove;
     int mover_sign = sideToMoveSign(position);
+    validation.before_score_white = best.score_white;
     Score best_score = scoreForSide(best.score_white, mover_sign);
     validation.best_display = formatMoveWithAlgebra(position, best.bestmove);
     validation.best_score = formatScore(best_score);
+    validation.ply_before = plyBeforeMove(position, fullmove);
+    validation.ply_after = validation.ply_before + 1;
 
     validation.reference_best = best.bestmove == played_move;
-    if (validation.reference_best) {
-        validation.ok = true;
+
+    auto played_position = positionAfterMove(position, played_move);
+    if (!played_position) {
+        validation.error = "could not apply played move";
         return validation;
     }
 
     ReferenceResult played = referenceSearch(reference,
-                                            position,
+                                            *played_position,
                                             resolved_limit,
                                             progress,
-                                            fmt::format("{} [{}/{}] played-move",
+                                            fmt::format("{} [{}/{}] played-position",
                                                         progress_verb, fullmove, display_total),
-                                            played_move);
+                                            "",
+                                            false);
     if (!played.has_score) {
         validation.error = "reference returned no score";
         return validation;
     }
 
+    validation.after_score_white = played.score_white;
     Score played_score = scoreForSide(played.score_white, mover_sign);
-    int best_cp = scoreAsCp(best_score);
-    int played_cp = scoreAsCp(played_score);
 
     validation.ok = true;
-    validation.cp_loss = std::clamp(best_cp - played_cp, 0, 1000);
+    validation.cp_loss = lichessCpLoss(best.score_white, played.score_white, mover_sign);
     validation.accuracy = lichessAccuracy(best_score, played_score);
     validation.label = lichessJudgement(best_score, played_score);
+    if (validation.cp_loss == 0 && isReportableJudgement(validation.label))
+        validation.label.clear();
     return validation;
 }
 
-MoveValidation validateMoveWithConfirmation(EngineProcess& reference,
-                                            const std::string& position,
-                                            const std::string& played_move,
-                                            const ReferenceLimit& limit,
-                                            bool confirm_reportable,
-                                            int logged_depth,
-                                            int fullmove,
-                                            int display_total,
-                                            bool progress) {
-    MoveValidation validation = validateMove(reference,
-                                             position,
-                                             played_move,
-                                             limit,
-                                             logged_depth,
-                                             fullmove,
-                                             display_total,
-                                             progress);
-    if (!confirm_reportable || !isReportableJudgement(validation.label))
-        return validation;
+ReferenceLimit sequenceAnalysisLimit(const ReferenceLimit& limit) {
+    if (limit.kind == ReferenceLimitKind::LoggedDepth)
+        return ReferenceLimit{};
+    return limit;
+}
 
-    return validateMove(reference,
-                        position,
-                        played_move,
-                        {ReferenceLimitKind::Nodes, kConfirmReferenceNodes},
-                        logged_depth,
-                        fullmove,
-                        display_total,
-                        progress,
-                        "confirming");
+std::map<int, PositionEvaluation> analyzeFishnetPositionSequence(EngineProcess& reference,
+                                                                 const PositionSequence& sequence,
+                                                                 const ReferenceLimit& reference_limit,
+                                                                 bool progress) {
+    std::map<int, PositionEvaluation> evaluations;
+    ReferenceLimit resolved_limit = sequenceAnalysisLimit(reference_limit);
+    int max_ply = static_cast<int>(sequence.moves.size());
+    if (max_ply < 0)
+        return evaluations;
+
+    std::vector<int> reversed;
+    reversed.reserve(max_ply + 1);
+    for (int ply = max_ply; ply >= 0; --ply)
+        reversed.push_back(ply);
+
+    int searched = 0;
+    int total_searches = static_cast<int>(reversed.size())
+                       + static_cast<int>((reversed.size() + kFishnetChunkPositions - 2)
+                                          / (kFishnetChunkPositions - 1));
+
+    for (int start = 0; start < static_cast<int>(reversed.size());
+         start += kFishnetChunkPositions - 1) {
+        int end = std::min(start + kFishnetChunkPositions - 1,
+                           static_cast<int>(reversed.size()));
+        int warmup_ply = start == 0 ? reversed[start] : reversed[start - 1];
+
+        resetReference(reference);
+
+        auto search_position = [&](int ply, bool store) {
+            searched++;
+            std::string position = positionFromSequence(sequence, ply);
+            std::string progress_text = fmt::format("analyzing position {}/{}",
+                                                    searched, total_searches);
+            if (store)
+                progress_text += fmt::format(" ply {}/{}", ply, max_ply);
+            else
+                progress_text += fmt::format(" warmup ply {}/{}", ply, max_ply);
+
+            PositionEvaluation evaluation;
+            try {
+                evaluation.result = referenceSearch(reference,
+                                                    position,
+                                                    resolved_limit,
+                                                    progress,
+                                                    progress_text,
+                                                    "",
+                                                    false);
+                if (!evaluation.result.has_score)
+                    evaluation.error = "reference returned no score";
+                else
+                    evaluation.ok = true;
+            } catch (const std::exception& ex) {
+                evaluation.error = ex.what();
+            }
+
+            if (store)
+                evaluations[ply] = evaluation;
+        };
+
+        search_position(warmup_ply, false);
+        for (int index = start; index < end; ++index)
+            search_position(reversed[index], true);
+    }
+
+    if (progress)
+        fmt::print("\r\033[K");
+
+    return evaluations;
+}
+
+MoveValidation validationFromPositionEvaluations(const LogEntry& entry,
+                                                 const PositionEvaluation& before,
+                                                 const PositionEvaluation& after) {
+    MoveValidation validation;
+    if (entry.expected.empty() || entry.expected == "(none)") {
+        validation.error = "no played move";
+        return validation;
+    }
+    if (!before.ok) {
+        validation.error = before.error.empty() ? "reference returned no score" : before.error;
+        return validation;
+    }
+    if (!after.ok) {
+        validation.error = after.error.empty() ? "reference returned no score" : after.error;
+        return validation;
+    }
+
+    int mover_sign = sideToMoveSign(entry.position);
+    validation.bestmove = before.result.bestmove;
+    validation.before_score_white = before.result.score_white;
+    validation.after_score_white = after.result.score_white;
+    validation.ply_before = plyBeforeMove(entry.position, entry.fullmove);
+    validation.ply_after = validation.ply_before + 1;
+    validation.reference_best = validation.bestmove == entry.expected;
+
+    Score best_score = scoreForSide(validation.before_score_white, mover_sign);
+    Score played_score = scoreForSide(validation.after_score_white, mover_sign);
+    validation.best_display = formatMoveWithAlgebra(entry.position, validation.bestmove);
+    validation.best_score = formatScore(best_score);
+    validation.cp_loss = lichessCpLoss(validation.before_score_white,
+                                       validation.after_score_white,
+                                       mover_sign);
+    validation.accuracy = lichessAccuracy(best_score, played_score);
+    validation.label = lichessJudgement(best_score, played_score);
+    if (validation.cp_loss == 0 && isReportableJudgement(validation.label))
+        validation.label.clear();
+    validation.ok = true;
+    return validation;
 }
 
 void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
@@ -1804,6 +2174,12 @@ void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
     stats.moves++;
     stats.cp_loss += validation.cp_loss;
     stats.accuracy += validation.accuracy;
+    if (stats.side_sign == 0)
+        stats.side_sign = sideToMoveSign(entry.position);
+    if (validation.ply_before > 0)
+        stats.ply_scores.push_back({validation.ply_before, validation.before_score_white});
+    if (validation.ply_after > 0)
+        stats.ply_scores.push_back({validation.ply_after, validation.after_score_white});
 
     if (!isReportableJudgement(validation.label))
         return;
@@ -1829,28 +2205,82 @@ void analyzeLoggedMoves(EngineProcess& reference,
                         bool print_move_output,
                         bool color,
                         bool include_fen,
-                        bool confirm_reportable,
                         std::vector<AnalysisEntry>& report,
                         AnalysisStats& stats,
                         int& analysis_failures) {
+    resetReference(reference);
     for (const auto& entry : entries) {
-        MoveValidation validation = validateMoveWithConfirmation(reference,
-                                                                 entry.position,
-                                                                 entry.expected,
-                                                                 reference_limit,
-                                                                 confirm_reportable,
-                                                                 entry.depth,
-                                                                 entry.fullmove,
-                                                                 display_total,
-                                                                 progress);
+        MoveValidation validation = validateMove(reference,
+                                                 entry.position,
+                                                 entry.expected,
+                                                 reference_limit,
+                                                 entry.depth,
+                                                 entry.fullmove,
+                                                 display_total,
+                                                 progress,
+                                                 "analyzing",
+                                                 false);
         if (progress)
             fmt::print("\r\033[K");
         if (print_move_output)
             printLogMoveLine(entry, display_total, line_widths,
                              validation, color, include_fen);
         appendAnalysisEntry(report, stats, analysis_failures, validation,
+                             entry, entry.expected, "", display_total);
+    }
+}
+
+bool analyzeLoggedPositionSequence(EngineProcess& reference,
+                                   const std::vector<LogEntry>& source_entries,
+                                   const std::vector<LogEntry>& requested_entries,
+                                   bool full_log_range,
+                                   const ReferenceLimit& reference_limit,
+                                   int display_total,
+                                   bool progress,
+                                   bool print_move_output,
+                                   bool color,
+                                   bool include_fen,
+                                   std::vector<AnalysisEntry>& report,
+                                   AnalysisStats& stats,
+                                   int& analysis_failures) {
+    auto sequence = reconstructedSequenceFromEntries(source_entries);
+    if (!sequence)
+        return false;
+
+    int side_sign = sideToMoveSign(requested_entries.front().position);
+    std::vector<LogEntry> analyzed_entries = full_log_range
+        ? sideEntriesFromSequence(*sequence, side_sign)
+        : requested_entries;
+    if (analyzed_entries.empty())
+        return false;
+
+    auto evaluations = analyzeFishnetPositionSequence(reference, *sequence,
+                                                      reference_limit, progress);
+    ReplayLineWidths line_widths = replayLineWidths(analyzed_entries, display_total);
+
+    for (const auto& entry : analyzed_entries) {
+        int ply_before = plyBeforeMove(entry.position, entry.fullmove);
+        int ply_after = ply_before + 1;
+        auto before = evaluations.find(ply_before);
+        auto after = evaluations.find(ply_after);
+
+        MoveValidation validation;
+        if (before == evaluations.end()) {
+            validation.error = fmt::format("missing reference evaluation for ply {}", ply_before);
+        } else if (after == evaluations.end()) {
+            validation.error = fmt::format("missing reference evaluation for ply {}", ply_after);
+        } else {
+            validation = validationFromPositionEvaluations(entry, before->second, after->second);
+        }
+
+        if (print_move_output)
+            printLogMoveLine(entry, display_total, line_widths,
+                             validation, color, include_fen);
+        appendAnalysisEntry(report, stats, analysis_failures, validation,
                             entry, entry.expected, "", display_total);
     }
+
+    return true;
 }
 
 SearchResult waitForBestmove(EngineProcess& engine,
@@ -2568,7 +2998,6 @@ int main(int argc, char* argv[]) {
     bool force = false;
     bool print_move_output = true;
     bool engine_path_explicit = false;
-    bool reference_limit_explicit = false;
     std::vector<std::pair<int, std::string>> positional_args;
 
     auto print_help = [&](const char* prog) {
@@ -2587,8 +3016,7 @@ int main(int argc, char* argv[]) {
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
-            "  --ref-nodes N       Reference analysis nodes; default uses 1000000 nodes\n"
-            "                      and confirms reported moves at 2000000 nodes\n"
+            "  --ref-nodes N       Reference analysis nodes; default uses 857142 nodes\n"
             "  --ref-depth N       Reference analysis depth instead of nodes; 0 follows logged depth\n"
             "  --log               Analyze logged moves instead of replayed moves;\n"
             "                      does not run the candidate engine\n"
@@ -2621,13 +3049,11 @@ int main(int argc, char* argv[]) {
             reference_path = argv[++i];
         } else if (arg == "--ref-nodes" && i + 1 < argc) {
             reference_limit = {ReferenceLimitKind::Nodes, std::max(1, std::stoi(argv[++i]))};
-            reference_limit_explicit = true;
         } else if (arg == "--ref-depth" && i + 1 < argc) {
             int depth = std::max(0, std::stoi(argv[++i]));
             reference_limit = depth == 0
                 ? ReferenceLimit{ReferenceLimitKind::LoggedDepth, 0}
                 : ReferenceLimit{ReferenceLimitKind::Depth, depth};
-            reference_limit_explicit = true;
         } else if (arg == "--log") {
             analysis_target = "log";
         } else if (arg == "--no-analysis") {
@@ -2710,8 +3136,6 @@ int main(int argc, char* argv[]) {
     bool cache_enabled = analyze
                       && start_move == 0
                       && count < 0;
-    bool confirm_reportable = analyze
-                            && shouldConfirmReportableMoves(reference_limit, reference_limit_explicit);
     bool stdin_input = std::find(logfile_targets.begin(), logfile_targets.end(), "-") != logfile_targets.end();
 
     bool logfile_is_directory = !batch_input && std::filesystem::is_directory(logfile);
@@ -2749,6 +3173,7 @@ int main(int argc, char* argv[]) {
 
         std::optional<AnalysisCache> cache;
         LogEntry final_log_entry = entries.back();
+        std::vector<LogEntry> full_log_entries = entries;
         std::string full_log_timeout_report = formatTimeoutReport(entries, final_log_entry.fullmove);
         std::string full_log_game_report = formatGameStatusReport(entries, full_log_timeout_report);
         bool needs_candidate = !analyze || analysis_target != "log";
@@ -2769,8 +3194,7 @@ int main(int argc, char* argv[]) {
             auto reference_config = probeEngineConfig(reference_path, {});
             cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
                                        time_mode, max_replay_nodes,
-                                       reference_limit, analysis_target,
-                                       confirm_reportable);
+                                       reference_limit, analysis_target);
             report_path = analysisPath(logfile_path, cache->key, analysis_target);
 
             if (!force && std::filesystem::exists(report_path)) {
@@ -2814,6 +3238,8 @@ int main(int argc, char* argv[]) {
                                         total_entries, total_entries));
         if (verbose && cache)
             fmt::print("{}\n", cache->provenance);
+
+        bool full_log_range = start_move <= 0 && count < 0;
 
         if (start_move > 0) {
             auto first = std::lower_bound(entries.begin(), entries.end(), start_move,
@@ -2863,10 +3289,24 @@ int main(int argc, char* argv[]) {
             AnalysisStats stats;
             int analysis_failures = 0;
 
-            analyzeLoggedMoves(*reference, entries, reference_limit, display_total,
-                               line_widths, progress, print_move_output,
-                               color_output, verbose, confirm_reportable,
-                               report, stats, analysis_failures);
+            bool analyzed_sequence = analyzeLoggedPositionSequence(*reference,
+                                                                   full_log_entries,
+                                                                   entries,
+                                                                   full_log_range,
+                                                                   reference_limit,
+                                                                   display_total,
+                                                                   progress,
+                                                                   print_move_output,
+                                                                   color_output,
+                                                                   verbose,
+                                                                   report,
+                                                                   stats,
+                                                                   analysis_failures);
+            if (!analyzed_sequence) {
+                analyzeLoggedMoves(*reference, entries, reference_limit, display_total,
+                                   line_widths, progress, print_move_output,
+                                   color_output, verbose, report, stats, analysis_failures);
+            }
 
             bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
             std::string timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
@@ -2938,15 +3378,14 @@ int main(int argc, char* argv[]) {
                 std::string analyzed_move = analysis_target == "log"
                     ? entry.expected
                     : result.bestmove;
-                MoveValidation validation = validateMoveWithConfirmation(*reference,
-                                                                         entry.position,
-                                                                         analyzed_move,
-                                                                         reference_limit,
-                                                                         confirm_reportable,
-                                                                         entry.depth,
-                                                                         entry.fullmove,
-                                                                         display_total,
-                                                                         progress);
+                MoveValidation validation = validateMove(*reference,
+                                                         entry.position,
+                                                         analyzed_move,
+                                                         reference_limit,
+                                                         entry.depth,
+                                                         entry.fullmove,
+                                                         display_total,
+                                                         progress);
                 if (progress)
                     fmt::print("\r\033[K");
 

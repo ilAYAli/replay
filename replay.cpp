@@ -49,7 +49,7 @@ constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNIN
 constexpr const char* kReplayBatch = "REPLAY_BATCH";
 constexpr const char* kBatchProgressPrefix = "BATCH_PROGRESS: ";
 constexpr long long kDefaultMaxReplayNodes = 300'000;
-constexpr long long kDefaultFixedReplayNodes = 0;
+constexpr long long kDefaultFixedReplayNodes = 100'000;
 constexpr int kDefaultFixedReplayMovetimeMs = 1000;
 constexpr int kDefaultReplayReferenceNodes = 200'000;
 
@@ -2493,7 +2493,7 @@ int main(int argc, char* argv[]) {
     int logfile_arg_index = -1;
     int start_move = 0;
     int count = -1;
-    int threads = -1;
+    int threads = 1;
     int jobs = 1;
     long long max_replay_nodes = kDefaultMaxReplayNodes;
     long long fixed_replay_nodes = kDefaultFixedReplayNodes;
@@ -2515,7 +2515,7 @@ int main(int argc, char* argv[]) {
             "Usage: {} [options] <logfile-or-directory> [more logs...]\n"
             "\n"
             "Replay UCI log searches and compare candidate output with a reference engine.\n"
-            "Candidate replay uses logged nodes capped at 300k unless another replay budget is set.\n"
+            "Candidate replay uses fixed 100k nodes unless another replay budget is set.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
             "Use '-' or pipe newline-separated paths on stdin to read log targets from stdin.\n"
             "At the end, judge moves with an oracle engine.\n"
@@ -2534,13 +2534,13 @@ int main(int argc, char* argv[]) {
             "  --count N           Replay at most N logged engine moves\n"
             "  --max-replay-nodes N\n"
             "                      Use logged nodes capped at N; 0 disables the cap\n"
-            "  --fixed-nodes N     Replay candidate with exactly N nodes per position\n"
+            "  --fixed-nodes N     Replay candidate with exactly N nodes per position (default: 100000)\n"
             "  --fixed-movetime [MS]\n"
             "                      Replay candidate with fixed movetime; default 1000 ms\n"
             "  --csv               Write per-position replay analysis rows to stdout\n"
             "  --time              Replay with the original logged go wtime/btime command;\n"
             "                      ignored with --log and overrides logged-node replay\n"
-            "  --threads N         Send `setoption name Threads value N`\n"
+            "  --threads N         Send `setoption name Threads value N` (default: 1)\n"
             "  --jobs N            Run up to N logs in parallel in batch mode (default: 1)\n"
             "  --color             Color judgement output\n"
             "  --verbose, -v       Print full UCI traffic and FENs\n"
@@ -2842,10 +2842,8 @@ int main(int argc, char* argv[]) {
             return engine;
         };
 
-        std::unique_ptr<EngineProcess> candidate = make_engine(candidate_path);
+        std::unique_ptr<EngineProcess> candidate;
         std::unique_ptr<EngineProcess> reference_engine;
-        if (compare_reference)
-            reference_engine = make_engine(reference_path);
 
         int searched = 0;
         int mismatches = 0;
@@ -2866,7 +2864,7 @@ int main(int argc, char* argv[]) {
         }
 
         for (const auto& entry : entries) {
-            if (!candidate)
+            if (compare_reference || !candidate)
                 candidate = make_engine(candidate_path);
 
             std::string go_command = time_mode ? entry.logged_go : entry.replay_go;
@@ -2887,8 +2885,7 @@ int main(int argc, char* argv[]) {
             SearchResult reference_result;
             bool reference_mismatch = false;
             if (compare_reference) {
-                if (!reference_engine)
-                    reference_engine = make_engine(reference_path);
+                reference_engine = make_engine(reference_path);
                 reference_engine->send(entry.position);
                 reference_engine->send(go_command);
                 reference_result = waitForBestmove(*reference_engine, entry,
@@ -3006,9 +3003,9 @@ int main(int argc, char* argv[]) {
                 fflush(stdout);
             }
 
-            if (mismatch)
+            if (compare_reference || mismatch)
                 candidate.reset();
-            if (reference_mismatch)
+            if (compare_reference || reference_mismatch)
                 reference_engine.reset();
         }
 

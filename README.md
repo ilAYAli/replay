@@ -14,6 +14,8 @@ with the logged moves.
   logged node count.
 - `--fixed-nodes N` ignores logged nodes and sends exactly N nodes for every
   position.
+- `--fixed-movetime [MS]` ignores logged nodes and sends exactly one fixed
+  movetime for every position. Without an argument it uses 1000 ms.
 - `--time` always sends the original logged `go wtime/btime/...` command.
 - If replay chooses a move different from the log, the engine is restarted
   before the next position so stale state from the diverged line is not reused.
@@ -28,10 +30,9 @@ This is not a reconstruction of the original search budget unless `--time` or
 
 ## Analysis
 
-By default replay also asks a reference engine, `stockfish`, to judge each
-candidate move. Replay mode compares the reference best move from the logged
-root position with a `searchmoves <candidate-move>` search from the same root.
-This is meant for comparing engine versions at the same logged positions.
+By default replay asks an oracle engine, `stockfish`, to judge each candidate
+move. Replay mode compares the oracle best move from the logged root position
+with a `searchmoves <candidate-move>` search from the same root.
 
 `--log` does not run the candidate engine. It analyzes the logged game mainline
 with Lichess-style consecutive position evals:
@@ -41,7 +42,7 @@ eval(position before move)
 eval(position after logged move)
 ```
 
-Reference analysis defaults to:
+Oracle analysis defaults to:
 
 ```text
 go nodes 200000
@@ -53,14 +54,20 @@ harmonic mean move accuracy, so one catastrophic move hurts more than several
 small losses. The game result itself is not a direct input to the score.
 
 For old/new engine comparisons, use the log set as positions and run both
-engines with the same fixed candidate and reference budgets:
+engines with the same replay budget, then let the oracle judge both moves:
 
 ```sh
-replay --engine ./old-enyo --fixed-nodes 100000 --ref-nodes 1000000 --csv logs/ > old.csv
-replay --engine ./new-enyo --fixed-nodes 100000 --ref-nodes 1000000 --csv logs/ > new.csv
+replay --candidate ./new-enyo --reference ./old-enyo --fixed-nodes 100000 --oracle-nodes 1000000 --csv logs/ > compare.csv
 ```
 
-`--csv` writes per-position rows to stdout.
+In candidate/reference/oracle mode, `diff = reference_loss - candidate_loss`.
+Positive diff means the candidate move was better than the reference move.
+Negative diff means the candidate was worse. The text summary prints the
+non-equal moves, net `diff`, median non-zero diff, worst regression, and best
+gain.
+
+`--csv` writes per-position rows to stdout and normal progress/output to stderr
+in batch mode.
 
 ## Log Requirements
 
@@ -102,7 +109,7 @@ replay --moves "game.log"
 Replay with an explicit candidate engine:
 
 ```sh
-replay --engine ./build/enyo "game.log"
+replay --candidate ./build/enyo "game.log"
 ```
 
 Analyze logged moves only; do not run the candidate engine:
@@ -154,29 +161,36 @@ Replay every candidate move with a fixed node budget:
 replay --fixed-nodes 100000 "game.log"
 ```
 
+Replay every candidate move with a fixed time budget:
+
+```sh
+replay --fixed-movetime "game.log"
+replay --fixed-movetime 1000 "game.log"
+```
+
 Write per-position comparison data:
 
 ```sh
-replay --fixed-nodes 100000 --ref-nodes 1000000 --csv "game.log" > out.csv
+replay --candidate ./new-enyo --reference ./old-enyo --fixed-nodes 100000 --oracle-nodes 1000000 --csv "game.log" > out.csv
 ```
 
-Replay without reference analysis:
+Replay without oracle analysis:
 
 ```sh
 replay --no-analysis "game.log"
 ```
 
-Use another reference engine:
+Use another oracle engine:
 
 ```sh
-replay --reference ~/source/berserk/src/berserk "game.log"
+replay --oracle ~/source/stockfish/src/stockfish "game.log"
 ```
 
-Change reference budget:
+Change oracle budget:
 
 ```sh
-replay --ref-nodes 2000000 "game.log"
-replay --ref-depth 16 "game.log"
+replay --oracle-nodes 2000000 "game.log"
+replay --oracle-depth 16 "game.log"
 ```
 
 Show UCI traffic and FENs:

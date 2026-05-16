@@ -50,6 +50,7 @@ constexpr const char* kReplayBatch = "REPLAY_BATCH";
 constexpr const char* kBatchProgressPrefix = "BATCH_PROGRESS: ";
 constexpr long long kDefaultMaxReplayNodes = 300'000;
 constexpr long long kDefaultFixedReplayNodes = 0;
+constexpr int kDefaultFixedReplayMovetimeMs = 1000;
 constexpr int kDefaultReplayReferenceNodes = 200'000;
 
 struct SearchResult {
@@ -57,6 +58,7 @@ struct SearchResult {
     std::vector<std::string> diagnostics;
     double wdl = 0.0;
     int mate_in = 0;
+    long long nodes = 0;
 };
 
 struct ReferenceResult {
@@ -125,21 +127,70 @@ struct CsvRow {
     std::string side;
     std::string log_move;
     std::string candidate_move;
-    bool same_as_log = false;
-    std::string reference_best;
-    std::string label;
-    int cp_loss = 0;
-    double accuracy = 100.0;
+    std::string reference_move;
+    std::string oracle_best;
+    int candidate_loss = 0;
+    int reference_loss = 0;
+    int delta_loss = 0;
+    std::string candidate_score;
+    std::string reference_score;
     std::string best_score;
     std::string replay_go;
     long long logged_nodes = 0;
+    long long candidate_nodes = 0;
+    long long reference_nodes = 0;
     double replay_wdl = 0.0;
+};
+
+struct ComparisonValidation {
+    bool ok = false;
+    std::string error;
+    std::string label;
+    std::string oracle_best;
+    std::string best_score;
+    Score candidate_score;
+    Score reference_score;
+    int candidate_loss = 0;
+    int reference_loss = 0;
+    int delta_loss = 0;
+    int ply_before = 0;
+};
+
+struct ComparisonEntry {
+    std::string label;
+    std::string candidate;
+    std::string reference;
+    std::string oracle_best;
+    int candidate_loss = 0;
+    int reference_loss = 0;
+    int delta_loss = 0;
+    int fullmove = 1;
+    int display_total = 1;
+};
+
+struct ComparisonStats {
+    int positions = 0;
+    int candidate_better = 0;
+    int reference_better = 0;
+    int equal = 0;
+    int failures = 0;
+    long long delta_loss = 0;
+    int best_gain = 0;
+    int worst_regression = 0;
+    std::vector<int> nonzero_diffs;
 };
 
 struct AnalysisWidths {
     size_t played = 4;
     size_t best = 4;
     size_t loss = 4;
+};
+
+struct ComparisonWidths {
+    size_t candidate = 9;
+    size_t reference = 9;
+    size_t oracle_best = 9;
+    size_t delta = 4;
 };
 
 struct ReplayLineWidths {
@@ -289,6 +340,24 @@ long long parseLongField(const std::string& line, const std::string& key) {
     }
 }
 
+std::optional<int> parsePositiveInt(std::string_view text) {
+    if (text.empty())
+        return std::nullopt;
+
+    long long value = 0;
+    for (char ch : text) {
+        if (!std::isdigit((unsigned char)ch))
+            return std::nullopt;
+        value = value * 10 + (ch - '0');
+        if (value > std::numeric_limits<int>::max())
+            return std::nullopt;
+    }
+
+    if (value <= 0)
+        return std::nullopt;
+    return static_cast<int>(value);
+}
+
 int extractDepth(const std::string& line) {
     return parseIntField(line, "depth");
 }
@@ -318,9 +387,11 @@ std::string csvEscape(std::string_view text) {
 }
 
 void writeCsvHeader(std::ostream& output) {
-    output << "log,fullmove,ply,side,log_move,candidate_move,same_as_log,"
-              "reference_best,label,cp_loss,accuracy,best_score,replay_go,"
-              "logged_nodes,replay_wdl\n";
+    output << "log,fullmove,ply,side,log_move,"
+              "candidate_move,reference_move,oracle_best,"
+              "candidate_loss,reference_loss,diff,"
+              "candidate_score,reference_score,best_score,"
+              "candidate_nodes,reference_nodes,replay_go,logged_nodes,replay_wdl\n";
 }
 
 void writeCsvRow(std::ostream& output, const CsvRow& row) {
@@ -330,12 +401,16 @@ void writeCsvRow(std::ostream& output, const CsvRow& row) {
            << row.side << ','
            << csvEscape(row.log_move) << ','
            << csvEscape(row.candidate_move) << ','
-           << (row.same_as_log ? 1 : 0) << ','
-           << csvEscape(row.reference_best) << ','
-           << csvEscape(row.label) << ','
-           << row.cp_loss << ','
-           << fmt::format("{:.2f}", row.accuracy) << ','
+           << csvEscape(row.reference_move) << ','
+           << csvEscape(row.oracle_best) << ','
+           << row.candidate_loss << ','
+           << row.reference_loss << ','
+           << row.delta_loss << ','
+           << csvEscape(row.candidate_score) << ','
+           << csvEscape(row.reference_score) << ','
            << csvEscape(row.best_score) << ','
+           << row.candidate_nodes << ','
+           << row.reference_nodes << ','
            << csvEscape(row.replay_go) << ','
            << row.logged_nodes << ','
            << fmt::format("{:.4f}", row.replay_wdl) << '\n';
@@ -354,9 +429,12 @@ std::string formatNodeCount(long long nodes) {
 std::string replayGoCommand(const std::string& logged_go,
                             long long logged_nodes,
                             long long max_replay_nodes,
-                            long long fixed_replay_nodes) {
+                            long long fixed_replay_nodes,
+                            int fixed_replay_movetime_ms) {
     if (fixed_replay_nodes > 0)
         return fmt::format("go nodes {}", fixed_replay_nodes);
+    if (fixed_replay_movetime_ms > 0)
+        return fmt::format("go movetime {}", fixed_replay_movetime_ms);
     if (logged_nodes <= 0)
         return logged_go;
     long long nodes = max_replay_nodes > 0
@@ -865,7 +943,7 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
 
     if (isReportableJudgement(validation.label)) {
         std::string judgement = fmt::format("{} {}cp", validation.label, validation.cp_loss);
-        return fmt::format("ref {}{}",
+        return fmt::format("oracle {}{}",
                            colorizeJudgementToken(fmt::format("{:<{}}", judgement, judgement_width),
                                                   validation.label, color),
                            best_report);
@@ -876,7 +954,7 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
         : (validation.cp_loss == 0 ? "equal" : fmt::format("loss {}cp", validation.cp_loss));
     std::string label = validation.reference_best || validation.cp_loss == 0 ? "best" : "";
 
-    return fmt::format("ref {}{}",
+    return fmt::format("oracle {}{}",
                        colorizeJudgementToken(fmt::format("{:<{}}", judgement, judgement_width), label, color),
                        best_report);
 }
@@ -1117,6 +1195,80 @@ std::string formatReplaySummaryReport(int searched,
                        max_wdl);
 }
 
+std::string formatSignedCp(int value) {
+    return fmt::format("{:+}cp", value);
+}
+
+std::string comparisonMoveText(const ComparisonEntry& entry) {
+    size_t fullmove_width = std::to_string(std::max(1, entry.display_total)).size();
+    return fmt::format("[{:>{}}/{}] {}",
+                       entry.fullmove, fullmove_width,
+                       entry.display_total, entry.candidate);
+}
+
+ComparisonWidths comparisonWidths(const std::vector<ComparisonEntry>& entries) {
+    ComparisonWidths widths;
+    for (const auto& entry : entries) {
+        widths.candidate = std::max(widths.candidate, comparisonMoveText(entry).size());
+        widths.reference = std::max(widths.reference, entry.reference.size());
+        widths.oracle_best = std::max(widths.oracle_best, entry.oracle_best.size());
+        widths.delta = std::max(widths.delta, formatSignedCp(entry.delta_loss).size());
+    }
+    return widths;
+}
+
+std::string formatComparisonEntry(const ComparisonEntry& entry,
+                                  const ComparisonWidths& widths) {
+    return fmt::format("{:<17} {:<{}}  reference: {:<{}}  oracle: {:<{}}  loss: {}/{}  diff: {:>{}}",
+                       entry.label + ":",
+                       comparisonMoveText(entry), widths.candidate,
+                       entry.reference, widths.reference,
+                       entry.oracle_best, widths.oracle_best,
+                       entry.candidate_loss, entry.reference_loss,
+                       formatSignedCp(entry.delta_loss), widths.delta);
+}
+
+int medianComparisonDiff(std::vector<int> diffs) {
+    if (diffs.empty())
+        return 0;
+
+    std::sort(diffs.begin(), diffs.end());
+    size_t middle = diffs.size() / 2;
+    if (diffs.size() % 2 != 0)
+        return diffs[middle];
+
+    return static_cast<int>(std::lround((diffs[middle - 1] + diffs[middle]) / 2.0));
+}
+
+std::string formatComparisonReport(const std::vector<ComparisonEntry>& report,
+                                   const ComparisonStats& stats) {
+    std::string output;
+    if (report.empty())
+        output += "No candidate/reference differences found.\n";
+    else {
+        ComparisonWidths widths = comparisonWidths(report);
+        for (const auto& entry : report)
+            output += formatComparisonEntry(entry, widths) + "\n";
+    }
+
+    if (stats.failures > 0)
+        output += fmt::format("Analysis failures  : {}\n", stats.failures);
+
+    output += fmt::format("candidate better:  {}\n"
+                          "reference better:  {}\n"
+                          "diff:              {}\n"
+                          "median diff:       {}\n"
+                          "worst regression:  {}\n"
+                          "best gain:         {}\n",
+                          stats.candidate_better,
+                          stats.reference_better,
+                          formatSignedCp(static_cast<int>(stats.delta_loss)),
+                          formatSignedCp(medianComparisonDiff(stats.nonzero_diffs)),
+                          formatSignedCp(stats.worst_regression),
+                          formatSignedCp(stats.best_gain));
+    return output;
+}
+
 std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
                                  const AnalysisStats& stats,
                                  int analysis_failures,
@@ -1253,7 +1405,7 @@ ReferenceResult referenceSearch(EngineProcess& engine,
     while (true) {
         auto line = engine.readLine();
         if (!line)
-            throw std::runtime_error("reference engine stopped during search");
+            throw std::runtime_error("analysis engine stopped during search");
 
         updateReferenceScore(result, *line, stm_sign);
         if (progress && line->find("info depth ") != std::string::npos) {
@@ -1378,6 +1530,105 @@ MoveValidation validateMove(EngineProcess& reference,
     } else if (validation.cp_loss == 0 && isReportableJudgement(validation.label)) {
         validation.label.clear();
     }
+    return validation;
+}
+
+std::string comparisonLabel(int delta_loss) {
+    if (delta_loss > 0)
+        return "candidate better";
+    if (delta_loss < 0)
+        return "candidate worse";
+    return "equal";
+}
+
+ReferenceResult evaluateOracleMove(EngineProcess& oracle,
+                                   const std::string& position,
+                                   const ReferenceLimit& limit,
+                                   bool progress,
+                                   const std::string& progress_text,
+                                   const std::string& move,
+                                   const ReferenceResult& best) {
+    if (move == best.bestmove)
+        return best;
+    return referenceSearch(oracle, position, limit, progress, progress_text, move, true);
+}
+
+ComparisonValidation validateComparison(EngineProcess& oracle,
+                                        const std::string& position,
+                                        const std::string& candidate_move,
+                                        const std::string& reference_move,
+                                        const ReferenceLimit& limit,
+                                        int logged_depth,
+                                        int fullmove,
+                                        int display_total,
+                                        bool progress) {
+    ComparisonValidation validation;
+    if (candidate_move.empty() || candidate_move == "(none)") {
+        validation.error = "no candidate move";
+        return validation;
+    }
+    if (reference_move.empty() || reference_move == "(none)") {
+        validation.error = "no reference move";
+        return validation;
+    }
+
+    ReferenceLimit resolved_limit = resolveReferenceLimit(limit, logged_depth);
+    ReferenceResult best = referenceSearch(oracle,
+                                          position,
+                                          resolved_limit,
+                                          progress,
+                                          fmt::format("analyzing [{}/{}] oracle-best",
+                                                      fullmove, display_total),
+                                          "",
+                                          true);
+    if (!best.has_score) {
+        validation.error = "oracle returned no score";
+        return validation;
+    }
+
+    ReferenceResult candidate = evaluateOracleMove(oracle,
+                                                   position,
+                                                   resolved_limit,
+                                                   progress,
+                                                   fmt::format("analyzing [{}/{}] candidate-move",
+                                                               fullmove, display_total),
+                                                   candidate_move,
+                                                   best);
+    if (!candidate.has_score) {
+        validation.error = "oracle returned no candidate score";
+        return validation;
+    }
+
+    ReferenceResult reference = candidate_move == reference_move
+        ? candidate
+        : evaluateOracleMove(oracle,
+                             position,
+                             resolved_limit,
+                             progress,
+                             fmt::format("analyzing [{}/{}] reference-move",
+                                         fullmove, display_total),
+                             reference_move,
+                             best);
+    if (!reference.has_score) {
+        validation.error = "oracle returned no reference score";
+        return validation;
+    }
+
+    int mover_sign = sideToMoveSign(position);
+    validation.ok = true;
+    validation.oracle_best = best.bestmove;
+    validation.best_score = formatScore(scoreForSide(best.score_white, mover_sign));
+    validation.candidate_score = scoreForSide(candidate.score_white, mover_sign);
+    validation.reference_score = scoreForSide(reference.score_white, mover_sign);
+    validation.candidate_loss = candidate_move == best.bestmove
+        ? 0
+        : lichessCpLoss(best.score_white, candidate.score_white, mover_sign);
+    validation.reference_loss = reference_move == best.bestmove
+        ? 0
+        : lichessCpLoss(best.score_white, reference.score_white, mover_sign);
+    validation.delta_loss = validation.reference_loss - validation.candidate_loss;
+    validation.label = comparisonLabel(validation.delta_loss);
+    validation.ply_before = plyBeforeMove(position, fullmove);
     return validation;
 }
 
@@ -1542,6 +1793,47 @@ void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
     });
 }
 
+void appendComparisonEntry(std::vector<ComparisonEntry>& report,
+                           ComparisonStats& stats,
+                           const ComparisonValidation& validation,
+                           const LogEntry& entry,
+                           const std::string& candidate_move,
+                           const std::string& reference_move,
+                           int display_total) {
+    if (!validation.ok) {
+        stats.failures++;
+        return;
+    }
+
+    stats.positions++;
+    stats.delta_loss += validation.delta_loss;
+    if (validation.delta_loss > 0)
+        stats.candidate_better++;
+    else if (validation.delta_loss < 0)
+        stats.reference_better++;
+    else
+        stats.equal++;
+
+    if (validation.delta_loss == 0)
+        return;
+
+    stats.nonzero_diffs.push_back(validation.delta_loss);
+    stats.best_gain = std::max(stats.best_gain, validation.delta_loss);
+    stats.worst_regression = std::min(stats.worst_regression, validation.delta_loss);
+
+    report.push_back({
+        validation.label,
+        candidate_move,
+        reference_move,
+        validation.oracle_best,
+        validation.candidate_loss,
+        validation.reference_loss,
+        validation.delta_loss,
+        entry.fullmove,
+        display_total
+    });
+}
+
 void analyzeLoggedMoves(EngineProcess& reference,
                         const std::vector<LogEntry>& entries,
                         const ReferenceLimit& reference_limit,
@@ -1638,6 +1930,7 @@ SearchResult waitForBestmove(EngineProcess& engine,
     int mate_in = 0;
     double wdl = 0.0;
     int stm_sign = sideToMoveSign(entry.position);
+    long long last_nodes = 0;
     std::vector<std::string> diagnostics;
 
     while (true) {
@@ -1653,6 +1946,9 @@ SearchResult waitForBestmove(EngineProcess& engine,
 
         if (line->find("info depth ") != std::string::npos) {
             int depth = extractDepth(*line);
+            long long nodes = parseLongField(*line, "nodes");
+            if (nodes > 0)
+                last_nodes = nodes;
             size_t mate_pos = line->find("score mate ");
             size_t score_pos = line->find("score cp ");
 
@@ -1670,7 +1966,6 @@ SearchResult waitForBestmove(EngineProcess& engine,
             }
 
             if (progress) {
-                long long nodes = parseLongField(*line, "nodes");
                 if (batchMode()) {
                     printSearchProgress(formatBatchSearchProgress(go_command,
                                                                   entry.fullmove,
@@ -1690,7 +1985,7 @@ SearchResult waitForBestmove(EngineProcess& engine,
         if (startsWith(*line, "bestmove ")) {
             if (progress)
                 clearSearchProgress();
-            return {extractMove(*line), diagnostics, wdl, mate_in};
+            return {extractMove(*line), diagnostics, wdl, mate_in, last_nodes};
         }
     }
 
@@ -1699,7 +1994,8 @@ SearchResult waitForBestmove(EngineProcess& engine,
 
 ParsedLog readLog(const std::filesystem::path& logfile,
                   long long max_replay_nodes,
-                  long long fixed_replay_nodes) {
+                  long long fixed_replay_nodes,
+                  int fixed_replay_movetime_ms) {
     std::ifstream file(logfile);
     if (!file.is_open())
         throw std::runtime_error(fmt::format("failed to open logfile: {}", logfile.string()));
@@ -1735,7 +2031,8 @@ ParsedLog readLog(const std::filesystem::path& logfile,
             pending_depth = 1;
         std::string replay_go = replayGoCommand(pending_go, pending_nodes,
                                                 max_replay_nodes,
-                                                fixed_replay_nodes);
+                                                fixed_replay_nodes,
+                                                fixed_replay_movetime_ms);
         if (pending_fen.empty()) {
             auto board = boardFromPosition(pending_position);
             if (board)
@@ -2189,8 +2486,9 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
 int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
 
-    std::string engine_path = "enyo";
-    std::string reference_path = "stockfish";
+    std::string candidate_path = "enyo";
+    std::string reference_path;
+    std::string oracle_path = "stockfish";
     std::string logfile;
     int logfile_arg_index = -1;
     int start_move = 0;
@@ -2199,7 +2497,8 @@ int main(int argc, char* argv[]) {
     int jobs = 1;
     long long max_replay_nodes = kDefaultMaxReplayNodes;
     long long fixed_replay_nodes = kDefaultFixedReplayNodes;
-    ReferenceLimit reference_limit{ReferenceLimitKind::Nodes, kDefaultReplayReferenceNodes};
+    int fixed_replay_movetime_ms = 0;
+    ReferenceLimit oracle_limit{ReferenceLimitKind::Nodes, kDefaultReplayReferenceNodes};
     std::string analysis_target = "replay";
     bool csv_output = false;
     bool time_mode = false;
@@ -2207,34 +2506,37 @@ int main(int argc, char* argv[]) {
     bool verbose = false;
     bool color_output = false;
     bool print_move_output = false;
-    bool engine_path_explicit = false;
+    bool candidate_path_explicit = false;
+    bool reference_path_explicit = false;
     std::vector<std::pair<int, std::string>> positional_args;
 
     auto print_help = [&](const char* prog) {
         fmt::print(
-            "Usage: {} [options] [engine] <logfile-or-directory> [more logs...]\n"
+            "Usage: {} [options] <logfile-or-directory> [more logs...]\n"
             "\n"
-            "Replay UCI log searches and compare engine output with logged moves.\n"
+            "Replay UCI log searches and compare candidate output with a reference engine.\n"
             "Candidate replay uses logged nodes capped at 300k unless another replay budget is set.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
             "Use '-' or pipe newline-separated paths on stdin to read log targets from stdin.\n"
-            "At the end, analyze replayed moves with a reference engine.\n"
+            "At the end, judge moves with an oracle engine.\n"
             "\n"
             "Options:\n"
-            "  --engine <path>     Engine binary to replay with (default: enyo)\n"
-            "  --candidate <path>  Alias for --engine\n"
-            "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
-            "  --ref-nodes N       Reference analysis nodes (default: 200000)\n"
-            "  --ref-depth N       Reference analysis depth instead of nodes; 0 follows logged depth\n"
+            "  --candidate <path>  Candidate engine to replay with (default: enyo)\n"
+            "  --reference <path>  Baseline engine to compare against\n"
+            "  --oracle <path>     Oracle engine for judging moves (default: stockfish)\n"
+            "  --oracle-nodes N    Oracle analysis nodes (default: 200000)\n"
+            "  --oracle-depth N    Oracle analysis depth instead of nodes; 0 follows logged depth\n"
             "  --log               Analyze logged moves instead of replayed moves;\n"
             "                      does not run the candidate engine\n"
-            "  --no-analysis       Replay only; do not run reference analysis\n"
+            "  --no-analysis       Replay only; do not run oracle analysis\n"
             "  --moves             Print per-position replay lines\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
             "  --max-replay-nodes N\n"
             "                      Use logged nodes capped at N; 0 disables the cap\n"
             "  --fixed-nodes N     Replay candidate with exactly N nodes per position\n"
+            "  --fixed-movetime [MS]\n"
+            "                      Replay candidate with fixed movetime; default 1000 ms\n"
             "  --csv               Write per-position replay analysis rows to stdout\n"
             "  --time              Replay with the original logged go wtime/btime command;\n"
             "                      ignored with --log and overrides logged-node replay\n"
@@ -2251,16 +2553,19 @@ int main(int argc, char* argv[]) {
         if (arg == "--help" || arg == "-h") {
             print_help(argv[0]);
             return 0;
-        } else if ((arg == "--engine" || arg == "--candidate") && i + 1 < argc) {
-            engine_path = argv[++i];
-            engine_path_explicit = true;
+        } else if (arg == "--candidate" && i + 1 < argc) {
+            candidate_path = argv[++i];
+            candidate_path_explicit = true;
         } else if (arg == "--reference" && i + 1 < argc) {
             reference_path = argv[++i];
-        } else if (arg == "--ref-nodes" && i + 1 < argc) {
-            reference_limit = {ReferenceLimitKind::Nodes, std::max(1, std::stoi(argv[++i]))};
-        } else if (arg == "--ref-depth" && i + 1 < argc) {
+            reference_path_explicit = true;
+        } else if (arg == "--oracle" && i + 1 < argc) {
+            oracle_path = argv[++i];
+        } else if (arg == "--oracle-nodes" && i + 1 < argc) {
+            oracle_limit = {ReferenceLimitKind::Nodes, std::max(1, std::stoi(argv[++i]))};
+        } else if (arg == "--oracle-depth" && i + 1 < argc) {
             int depth = std::max(0, std::stoi(argv[++i]));
-            reference_limit = depth == 0
+            oracle_limit = depth == 0
                 ? ReferenceLimit{ReferenceLimitKind::LoggedDepth, 0}
                 : ReferenceLimit{ReferenceLimitKind::Depth, depth};
         } else if (arg == "--log") {
@@ -2276,8 +2581,28 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--max-replay-nodes" && i + 1 < argc) {
             max_replay_nodes = std::max(0LL, std::stoll(argv[++i]));
             fixed_replay_nodes = 0;
+            fixed_replay_movetime_ms = 0;
         } else if (arg == "--fixed-nodes" && i + 1 < argc) {
             fixed_replay_nodes = std::max(1LL, std::stoll(argv[++i]));
+            fixed_replay_movetime_ms = 0;
+        } else if (startsWith(arg, "--fixed-movetime=")) {
+            auto value = parsePositiveInt(arg.substr(17));
+            if (!value) {
+                fmt::print(stderr, "Invalid --fixed-movetime value: {}\n", arg.substr(17));
+                return 1;
+            }
+            fixed_replay_movetime_ms = *value;
+            fixed_replay_nodes = 0;
+        } else if (arg == "--fixed-movetime") {
+            fixed_replay_movetime_ms = kDefaultFixedReplayMovetimeMs;
+            fixed_replay_nodes = 0;
+            if (i + 1 < argc) {
+                auto value = parsePositiveInt(argv[i + 1]);
+                if (value) {
+                    fixed_replay_movetime_ms = *value;
+                    i++;
+                }
+            }
         } else if (arg == "--csv") {
             csv_output = true;
         } else if (arg == "--threads" && i + 1 < argc) {
@@ -2287,6 +2612,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--time") {
             time_mode = true;
             fixed_replay_nodes = 0;
+            fixed_replay_movetime_ms = 0;
         } else if (arg == "--color") {
             color_output = true;
         } else if (arg == "--verbose" || arg == "-v") {
@@ -2301,7 +2627,7 @@ int main(int argc, char* argv[]) {
     }
 
     bool batch_uses_positional_engine = positional_args.size() > 2
-                                     && !engine_path_explicit
+                                     && !candidate_path_explicit
                                      && canBePositionalEngine(positional_args[0].second)
                                      && containsLogTarget(positional_args, 1);
 
@@ -2309,13 +2635,13 @@ int main(int argc, char* argv[]) {
         logfile_arg_index = positional_args[0].first;
         logfile = positional_args[0].second;
     } else if (positional_args.size() == 2
-            && !engine_path_explicit
+            && !candidate_path_explicit
             && isPositionalEngine(positional_args[0].second, positional_args[1].second)) {
-        engine_path = positional_args[0].second;
+        candidate_path = positional_args[0].second;
         logfile_arg_index = positional_args[1].first;
         logfile = positional_args[1].second;
     } else if (batch_uses_positional_engine) {
-        engine_path = positional_args[0].second;
+        candidate_path = positional_args[0].second;
     }
 
     bool batch_input = positional_args.size() > 1 && logfile.empty();
@@ -2346,18 +2672,26 @@ int main(int argc, char* argv[]) {
         fmt::print(stderr, "ERROR: --log cannot be used with --no-analysis\n");
         return 1;
     }
+    if (reference_path_explicit && analysis_target == "log") {
+        fmt::print(stderr, "ERROR: --reference compares replayed candidate output; it cannot be used with --log\n");
+        return 1;
+    }
+    if (reference_path_explicit && !analyze) {
+        fmt::print(stderr, "ERROR: --reference needs oracle analysis; remove --no-analysis\n");
+        return 1;
+    }
     if (csv_output && analysis_target == "log") {
         fmt::print(stderr, "ERROR: --csv is only supported for replay mode\n");
         return 1;
     }
     if (csv_output && !analyze) {
-        fmt::print(stderr, "ERROR: --csv needs reference analysis; remove --no-analysis\n");
+        fmt::print(stderr, "ERROR: --csv needs oracle analysis; remove --no-analysis\n");
         return 1;
     }
     if (csv_output)
         print_move_output = false;
-    if (fixed_replay_nodes > 0 && time_mode) {
-        fmt::print(stderr, "ERROR: --fixed-nodes cannot be combined with --time\n");
+    if ((fixed_replay_nodes > 0 || fixed_replay_movetime_ms > 0) && time_mode) {
+        fmt::print(stderr, "ERROR: fixed replay budgets cannot be combined with --time\n");
         return 1;
     }
 
@@ -2388,7 +2722,8 @@ int main(int argc, char* argv[]) {
 
     try {
         std::filesystem::path logfile_path = logfile;
-        ParsedLog parsed = readLog(logfile, max_replay_nodes, fixed_replay_nodes);
+        ParsedLog parsed = readLog(logfile, max_replay_nodes, fixed_replay_nodes,
+                                   fixed_replay_movetime_ms);
         std::vector<LogEntry> entries = parsed.entries;
         if (entries.empty()) {
             fmt::print(stderr, "ERROR: No UCI go/bestmove pairs found in '{}'\n", logfile);
@@ -2400,6 +2735,7 @@ int main(int argc, char* argv[]) {
         std::string full_log_timeout_report = formatTimeoutReport(entries, final_log_entry.fullmove);
         std::string full_log_game_report = formatGameStatusReport(entries, full_log_timeout_report);
         bool needs_candidate = !analyze || analysis_target != "log";
+        bool compare_reference = reference_path_explicit && analysis_target != "log";
 
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
@@ -2434,21 +2770,25 @@ int main(int argc, char* argv[]) {
 
         ReplayLineWidths line_widths = replayLineWidths(entries, display_total);
 
-        if (needs_candidate && !executableExists(engine_path)) {
-            fmt::print(stderr, "ERROR: Engine '{}' not found or not executable\n", engine_path);
+        if (needs_candidate && !executableExists(candidate_path)) {
+            fmt::print(stderr, "ERROR: Candidate engine '{}' not found or not executable\n", candidate_path);
+            return 1;
+        }
+        if (compare_reference && !executableExists(reference_path)) {
+            fmt::print(stderr, "ERROR: Reference engine '{}' not found or not executable\n", reference_path);
             return 1;
         }
 
-        std::unique_ptr<EngineProcess> reference;
+        std::unique_ptr<EngineProcess> oracle;
         if (analyze) {
-            if (!executableExists(reference_path)) {
-                fmt::print(stderr, "ERROR: Reference engine '{}' not found or not executable\n", reference_path);
-                fmt::print(stderr, "Use --reference <path> or --no-analysis.\n");
+            if (!executableExists(oracle_path)) {
+                fmt::print(stderr, "ERROR: Oracle engine '{}' not found or not executable\n", oracle_path);
+                fmt::print(stderr, "Use --oracle <path> or --no-analysis.\n");
                 return 1;
             }
 
-            reference = std::make_unique<EngineProcess>(reference_path, verbose);
-            initializeReference(*reference);
+            oracle = std::make_unique<EngineProcess>(oracle_path, verbose);
+            initializeReference(*oracle);
         }
 
         if (analyze && analysis_target == "log") {
@@ -2457,11 +2797,11 @@ int main(int argc, char* argv[]) {
             AnalysisStats stats;
             int analysis_failures = 0;
 
-            bool analyzed_sequence = analyzeLoggedPositionSequence(*reference,
+            bool analyzed_sequence = analyzeLoggedPositionSequence(*oracle,
                                                                    full_log_entries,
                                                                    entries,
                                                                    full_log_range,
-                                                                   reference_limit,
+                                                                   oracle_limit,
                                                                    display_total,
                                                                    progress,
                                                                    print_move_output,
@@ -2471,7 +2811,7 @@ int main(int argc, char* argv[]) {
                                                                    stats,
                                                                    analysis_failures);
             if (!analyzed_sequence) {
-                analyzeLoggedMoves(*reference, entries, reference_limit, display_total,
+                analyzeLoggedMoves(*oracle, entries, oracle_limit, display_total,
                                    line_widths, progress, print_move_output,
                                    color_output, verbose, report, stats, analysis_failures);
             }
@@ -2496,13 +2836,16 @@ int main(int argc, char* argv[]) {
             return reportTriggersFailure(analysis_report_body) ? 1 : 0;
         }
 
-        auto make_engine = [&] {
-            auto engine = std::make_unique<EngineProcess>(engine_path, verbose);
+        auto make_engine = [&](const std::string& path) {
+            auto engine = std::make_unique<EngineProcess>(path, verbose);
             initializeEngine(*engine, parsed.setoptions, threads);
             return engine;
         };
 
-        std::unique_ptr<EngineProcess> engine = make_engine();
+        std::unique_ptr<EngineProcess> candidate = make_engine(candidate_path);
+        std::unique_ptr<EngineProcess> reference_engine;
+        if (compare_reference)
+            reference_engine = make_engine(reference_path);
 
         int searched = 0;
         int mismatches = 0;
@@ -2513,6 +2856,8 @@ int main(int argc, char* argv[]) {
         std::vector<AnalysisEntry> report;
         AnalysisStats stats;
         int analysis_failures = 0;
+        std::vector<ComparisonEntry> comparison_report;
+        ComparisonStats comparison_stats;
         std::ostringstream csv_buffer;
         std::ostream* csv_stream = nullptr;
         if (csv_output) {
@@ -2521,14 +2866,14 @@ int main(int argc, char* argv[]) {
         }
 
         for (const auto& entry : entries) {
-            if (!engine)
-                engine = make_engine();
+            if (!candidate)
+                candidate = make_engine(candidate_path);
 
             std::string go_command = time_mode ? entry.logged_go : entry.replay_go;
-            engine->send(entry.position);
-            engine->send(go_command);
+            candidate->send(entry.position);
+            candidate->send(go_command);
 
-            SearchResult result = waitForBestmove(*engine, entry, go_command, display_total, progress);
+            SearchResult result = waitForBestmove(*candidate, entry, go_command, display_total, progress);
             searched++;
             bool mismatch = result.bestmove != entry.expected;
             std::string played_display = formatMoveDisplay(entry.position, result.bestmove);
@@ -2539,48 +2884,108 @@ int main(int argc, char* argv[]) {
             max_wdl = std::max(max_wdl, result.wdl);
             final_wdl = result.wdl;
 
+            SearchResult reference_result;
+            bool reference_mismatch = false;
+            if (compare_reference) {
+                if (!reference_engine)
+                    reference_engine = make_engine(reference_path);
+                reference_engine->send(entry.position);
+                reference_engine->send(go_command);
+                reference_result = waitForBestmove(*reference_engine, entry,
+                                                   go_command, display_total, progress);
+                reference_mismatch = reference_result.bestmove != entry.expected;
+            }
+
             std::string reference_suffix;
             if (analyze) {
-                std::string analyzed_move = analysis_target == "log"
-                    ? entry.expected
-                    : result.bestmove;
-                MoveValidation validation = validateMove(*reference,
-                                                         entry.position,
-                                                         analyzed_move,
-                                                         reference_limit,
-                                                         entry.depth,
-                                                         entry.fullmove,
-                                                         display_total,
-                                                         progress,
-                                                         "analyzing",
-                                                         true,
-                                                         ReferenceScoringMode::RootSearchmoves);
-                if (progress)
-                    clearSearchProgress();
+                if (compare_reference) {
+                    ComparisonValidation validation = validateComparison(*oracle,
+                                                                        entry.position,
+                                                                        result.bestmove,
+                                                                        reference_result.bestmove,
+                                                                        oracle_limit,
+                                                                        entry.depth,
+                                                                        entry.fullmove,
+                                                                        display_total,
+                                                                        progress);
+                    if (progress)
+                        clearSearchProgress();
 
-                reference_suffix = formatReferenceInline(validation, color_output);
-                appendAnalysisEntry(report, stats, analysis_failures, validation,
-                                    entry, analyzed_move,
-                                    analysis_target == "replay" && mismatch ? entry.expected : "",
-                                    display_total);
-                if (csv_stream) {
-                    writeCsvRow(*csv_stream, {
-                        logfile_path,
-                        entry.fullmove,
-                        validation.ply_before,
-                        sideToMoveName(entry.position),
-                        entry.expected,
-                        analyzed_move,
-                        !mismatch,
-                        validation.bestmove,
-                        validation.ok ? validation.label : validation.error,
-                        validation.ok ? validation.cp_loss : 0,
-                        validation.ok ? validation.accuracy : 0.0,
-                        validation.best_score,
-                        go_command,
-                        entry.nodes,
-                        result.wdl
-                    });
+                    appendComparisonEntry(comparison_report, comparison_stats,
+                                          validation, entry,
+                                          result.bestmove, reference_result.bestmove,
+                                          display_total);
+                    reference_suffix = validation.ok
+                        ? fmt::format("reference {} | oracle {} | delta {}",
+                                      reference_result.bestmove,
+                                      validation.oracle_best,
+                                      formatSignedCp(validation.delta_loss))
+                        : fmt::format("oracle {}", validation.error);
+                    if (csv_stream) {
+                        CsvRow row;
+                        row.log_path = logfile_path;
+                        row.fullmove = entry.fullmove;
+                        row.ply_before = validation.ply_before;
+                        row.side = sideToMoveName(entry.position);
+                        row.log_move = entry.expected;
+                        row.candidate_move = result.bestmove;
+                        row.reference_move = reference_result.bestmove;
+                        row.oracle_best = validation.ok ? validation.oracle_best : "";
+                        row.candidate_loss = validation.ok ? validation.candidate_loss : 0;
+                        row.reference_loss = validation.ok ? validation.reference_loss : 0;
+                        row.delta_loss = validation.ok ? validation.delta_loss : 0;
+                        row.candidate_score = validation.ok ? formatScore(validation.candidate_score) : "";
+                        row.reference_score = validation.ok ? formatScore(validation.reference_score) : "";
+                        row.best_score = validation.ok ? validation.best_score : "";
+                        row.candidate_nodes = result.nodes;
+                        row.reference_nodes = reference_result.nodes;
+                        row.replay_go = go_command;
+                        row.logged_nodes = entry.nodes;
+                        row.replay_wdl = result.wdl;
+                        writeCsvRow(*csv_stream, row);
+                    }
+                } else {
+                    MoveValidation validation = validateMove(*oracle,
+                                                             entry.position,
+                                                             result.bestmove,
+                                                             oracle_limit,
+                                                             entry.depth,
+                                                             entry.fullmove,
+                                                             display_total,
+                                                             progress,
+                                                             "analyzing",
+                                                             true,
+                                                             ReferenceScoringMode::RootSearchmoves);
+                    if (progress)
+                        clearSearchProgress();
+
+                    reference_suffix = formatReferenceInline(validation, color_output);
+                    appendAnalysisEntry(report, stats, analysis_failures, validation,
+                                        entry, result.bestmove,
+                                        mismatch ? entry.expected : "",
+                                        display_total);
+                    if (csv_stream) {
+                        CsvRow row;
+                        row.log_path = logfile_path;
+                        row.fullmove = entry.fullmove;
+                        row.ply_before = validation.ply_before;
+                        row.side = sideToMoveName(entry.position);
+                        row.log_move = entry.expected;
+                        row.candidate_move = result.bestmove;
+                        row.oracle_best = validation.ok ? validation.bestmove : "";
+                        row.candidate_loss = validation.ok ? validation.cp_loss : 0;
+                        row.delta_loss = validation.ok ? validation.cp_loss : 0;
+                        row.candidate_score = validation.ok
+                            ? formatScore(scoreForSide(validation.after_score_white,
+                                                       sideToMoveSign(entry.position)))
+                            : "";
+                        row.best_score = validation.ok ? validation.best_score : "";
+                        row.candidate_nodes = result.nodes;
+                        row.replay_go = go_command;
+                        row.logged_nodes = entry.nodes;
+                        row.replay_wdl = result.wdl;
+                        writeCsvRow(*csv_stream, row);
+                    }
                 }
             }
 
@@ -2602,7 +3007,9 @@ int main(int argc, char* argv[]) {
             }
 
             if (mismatch)
-                engine.reset();
+                candidate.reset();
+            if (reference_mismatch)
+                reference_engine.reset();
         }
 
         std::string analysis_report_body;
@@ -2617,9 +3024,13 @@ int main(int argc, char* argv[]) {
             bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
             timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
             game_report = includes_final_log_entry ? full_log_game_report : "";
-            analysis_report_body = formatAnalysisReport(report, stats, analysis_failures,
-                                                        false, true,
-                                                        game_report, timeout_report);
+            if (compare_reference) {
+                analysis_report_body = formatComparisonReport(comparison_report, comparison_stats);
+            } else {
+                analysis_report_body = formatAnalysisReport(report, stats, analysis_failures,
+                                                            false, true,
+                                                            game_report, timeout_report);
+            }
             if (csv_output) {
                 std::string csv_report_body = csv_buffer.str();
                 fmt::print("{}", csv_report_body);
@@ -2628,7 +3039,9 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
 
-            std::string text_report_body = replay_summary_body + "\n" + analysis_report_body;
+            std::string text_report_body = compare_reference
+                ? analysis_report_body
+                : replay_summary_body + "\n" + analysis_report_body;
             if (print_move_output)
                 printBatchBlock("\n");
             printSummaryReport(text_report_body, color_output, verbose);

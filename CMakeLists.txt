@@ -15,7 +15,6 @@ add_library(enyo_chess STATIC
     "${ENYO_SOURCE_DIR}/src/fen.cpp"
     "${ENYO_SOURCE_DIR}/src/board.cpp"
     "${ENYO_SOURCE_DIR}/magic/magic.cpp"
-    "${ENYO_SOURCE_DIR}/src/pgn.cpp"
     "${ENYO_SOURCE_DIR}/src/zobrist.cpp"
 )
 target_include_directories(enyo_chess PUBLIC
@@ -28,7 +27,6 @@ target_link_libraries(enyo_chess PUBLIC
 )
 
 add_executable(replay
-    analysis_cache.cpp
     engine_process.cpp
     lichess_analysis.cpp
     replay.cpp

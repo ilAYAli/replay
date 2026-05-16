@@ -22,12 +22,11 @@
 #include <vector>
 #include <fmt/format.h>
 
-#include "analysis_cache.hpp"
 #include "engine_process.hpp"
 #include "lichess_analysis.hpp"
+#include "reference_limit.hpp"
 #include "board.hpp"
 #include "movegen.hpp"
-#include "pgn.hpp"
 
 struct LogEntry {
     std::string position;
@@ -49,6 +48,9 @@ struct ParsedLog {
 constexpr const char* kSuppressLogTimeWarning = "REPLAY_SUPPRESS_LOG_TIME_WARNING";
 constexpr const char* kReplayBatch = "REPLAY_BATCH";
 constexpr const char* kBatchProgressPrefix = "BATCH_PROGRESS: ";
+constexpr long long kDefaultMaxReplayNodes = 300'000;
+constexpr long long kDefaultFixedReplayNodes = 0;
+constexpr int kDefaultReplayReferenceNodes = 200'000;
 
 struct SearchResult {
     std::string bestmove;
@@ -74,9 +76,15 @@ struct PositionEvaluation {
     std::string error;
 };
 
+enum class ReferenceScoringMode {
+    ConsecutivePosition,
+    RootSearchmoves
+};
+
 struct MoveValidation {
     bool ok = false;
     bool reference_best = false;
+    bool consecutive_position_scores = true;
     std::string error;
     std::string label;
     std::string bestmove;
@@ -105,8 +113,27 @@ struct AnalysisStats {
     int moves = 0;
     long long cp_loss = 0;
     double accuracy = 0.0;
+    double harmonic_accuracy_denominator = 0.0;
     int side_sign = 0;
     std::vector<std::pair<int, Score>> ply_scores;
+};
+
+struct CsvRow {
+    std::filesystem::path log_path;
+    int fullmove = 1;
+    int ply_before = 0;
+    std::string side;
+    std::string log_move;
+    std::string candidate_move;
+    bool same_as_log = false;
+    std::string reference_best;
+    std::string label;
+    int cp_loss = 0;
+    double accuracy = 100.0;
+    std::string best_score;
+    std::string replay_go;
+    long long logged_nodes = 0;
+    double replay_wdl = 0.0;
 };
 
 struct AnalysisWidths {
@@ -274,6 +301,46 @@ std::string formatMillis(int milliseconds) {
     return fmt::format("{}ms", milliseconds);
 }
 
+std::string csvEscape(std::string_view text) {
+    bool quote = text.find_first_of(",\"\n\r") != std::string_view::npos;
+    if (!quote)
+        return std::string{text};
+
+    std::string escaped = "\"";
+    for (char ch : text) {
+        if (ch == '"')
+            escaped += "\"\"";
+        else
+            escaped += ch;
+    }
+    escaped += "\"";
+    return escaped;
+}
+
+void writeCsvHeader(std::ostream& output) {
+    output << "log,fullmove,ply,side,log_move,candidate_move,same_as_log,"
+              "reference_best,label,cp_loss,accuracy,best_score,replay_go,"
+              "logged_nodes,replay_wdl\n";
+}
+
+void writeCsvRow(std::ostream& output, const CsvRow& row) {
+    output << csvEscape(row.log_path.string()) << ','
+           << row.fullmove << ','
+           << row.ply_before << ','
+           << row.side << ','
+           << csvEscape(row.log_move) << ','
+           << csvEscape(row.candidate_move) << ','
+           << (row.same_as_log ? 1 : 0) << ','
+           << csvEscape(row.reference_best) << ','
+           << csvEscape(row.label) << ','
+           << row.cp_loss << ','
+           << fmt::format("{:.2f}", row.accuracy) << ','
+           << csvEscape(row.best_score) << ','
+           << csvEscape(row.replay_go) << ','
+           << row.logged_nodes << ','
+           << fmt::format("{:.4f}", row.replay_wdl) << '\n';
+}
+
 std::string formatNodeCount(long long nodes) {
     if (nodes >= 1'000'000'000)
         return fmt::format("{:.1f}B", static_cast<double>(nodes) / 1'000'000'000.0);
@@ -286,7 +353,10 @@ std::string formatNodeCount(long long nodes) {
 
 std::string replayGoCommand(const std::string& logged_go,
                             long long logged_nodes,
-                            long long max_replay_nodes) {
+                            long long max_replay_nodes,
+                            long long fixed_replay_nodes) {
+    if (fixed_replay_nodes > 0)
+        return fmt::format("go nodes {}", fixed_replay_nodes);
     if (logged_nodes <= 0)
         return logged_go;
     long long nodes = max_replay_nodes > 0
@@ -404,8 +474,26 @@ int plyBeforeMove(const std::string& position, int fullmove) {
     return std::max(0, fullmove * 2 - 1);
 }
 
+template <enyo::Color Us>
+std::optional<enyo::Move> resolveUciMoveForSide(enyo::Board& board, std::string_view uci) {
+    const Movelist moves = generate_legal_moves<Us, false, false>(board);
+    for (auto move : moves) {
+        if (fmt::format("{}", move) == uci)
+            return move;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<enyo::Move> resolveUciMove(const enyo::Board& board, std::string_view uci) {
+    enyo::Board copy = board;
+    if (copy.side == enyo::white)
+        return resolveUciMoveForSide<enyo::white>(copy, uci);
+    return resolveUciMoveForSide<enyo::black>(copy, uci);
+}
+
 bool applyUciMove(enyo::Board& board, const std::string& move) {
-    auto resolved = enyo::uci_to_move(board, move);
+    auto resolved = resolveUciMove(board, move);
     if (!resolved)
         return false;
 
@@ -653,35 +741,15 @@ bool opponentHasImmediateCheckmateAfterMove(const LogEntry& entry) {
     return !immediateCheckmateMoves(*board).empty();
 }
 
-std::string algebraForMove(const std::string& position, const std::string& move) {
-    if (move.empty() || move == "(none)")
-        return "";
-
-    auto board = boardFromPosition(position);
-    if (!board)
-        return "";
-
-    try {
-        return enyo::uci_to_algebra(*board, move);
-    } catch (...) {
-        return "";
-    }
-}
-
-std::string formatMoveWithAlgebra(const std::string& position, const std::string& move) {
-    std::string algebra = algebraForMove(position, move);
-    if (algebra.empty())
-        return move;
-    if (move.size() == 5 && algebra.rfind(move.substr(2, 2) + "=", 0) == 0)
-        return move;
-    return fmt::format("{} ({})", move, algebra);
+std::string formatMoveDisplay(const std::string&, const std::string& move) {
+    return move;
 }
 
 ReplayLineWidths replayLineWidths(const std::vector<LogEntry>& entries, int display_total) {
     ReplayLineWidths widths;
     widths.fullmove = std::to_string(std::max(1, display_total)).size();
     for (const auto& entry : entries) {
-        std::string expected = formatMoveWithAlgebra(entry.position, entry.expected);
+        std::string expected = formatMoveDisplay(entry.position, entry.expected);
         widths.replay = std::max(widths.replay, expected.size());
         widths.replay = std::max(widths.replay, fmt::format("{} != log {}", expected, expected).size());
     }
@@ -902,6 +970,11 @@ void printSearchProgress(const std::string& text) {
     std::fflush(stdout);
 }
 
+void clearSearchProgress() {
+    if (!batchMode())
+        fmt::print("\r\033[K");
+}
+
 std::string batchIndent(const std::string& text) {
     if (!batchMode())
         return text;
@@ -989,7 +1062,7 @@ void printLogMoveLine(const LogEntry& entry,
                       const MoveValidation& validation,
                       bool color,
                       bool include_fen) {
-    std::string played_display = formatMoveWithAlgebra(entry.position, entry.expected);
+    std::string played_display = formatMoveDisplay(entry.position, entry.expected);
     std::string reference_suffix = formatReferenceInline(validation, color);
     printBatchBlock(fmt::format("[{:>{}}/{}] {:<{}} :: {}\n",
                                 entry.fullmove, widths.fullmove, display_total,
@@ -999,38 +1072,6 @@ void printLogMoveLine(const LogEntry& entry,
         printBatchBlock(formatDiagnosticLine(diagnostic, entry.fullmove, display_total,
                                              color, include_fen) + "\n");
     fflush(stdout);
-}
-
-std::string replaceDerivedReportLines(const std::string& report,
-                                      const std::string& game_report,
-                                      const std::string& timeout_report) {
-    std::istringstream input(report);
-    std::string output;
-    std::string score_report;
-    std::string line;
-    while (std::getline(input, line)) {
-        if ((!game_report.empty() || !timeout_report.empty())
-         && line == "No inaccuracies, mistakes, or blunders.")
-            continue;
-        if (startsWith(line, "accuracy:")
-         || startsWith(line, "Accuracy:")
-         || startsWith(line, "avg loss:")
-         || startsWith(line, "Avg loss:")) {
-            score_report += line + "\n";
-            continue;
-        }
-        if (startsWith(line, "game:"))
-            continue;
-        if (!startsWith(line, "timeout:"))
-            output += line + "\n";
-    }
-
-    output += timeout_report;
-    output += score_report;
-    output += game_report;
-    if (output.empty())
-        output = "No inaccuracies, mistakes, or blunders.\n";
-    return output;
 }
 
 std::string formatAccuracyReport(const AnalysisStats& stats) {
@@ -1043,6 +1084,37 @@ std::string formatAccuracyReport(const AnalysisStats& stats) {
     return fmt::format("{:<11} {}%\n{:<11} {}cp\n",
                        "accuracy:", accuracy,
                        "avg loss:", avg_loss);
+}
+
+std::string formatGameScoreReport(const AnalysisStats& stats) {
+    if (stats.moves == 0)
+        return "";
+
+    double mean_accuracy = stats.accuracy / stats.moves;
+    double harmonic_accuracy = stats.harmonic_accuracy_denominator > 0.0
+        ? static_cast<double>(stats.moves) / stats.harmonic_accuracy_denominator
+        : mean_accuracy;
+    int score = std::clamp(static_cast<int>(std::lround((mean_accuracy + harmonic_accuracy) / 2.0)),
+                           0, 100);
+    return fmt::format("{:<11} {}\n", "score:", score);
+}
+
+std::string formatReplaySummaryReport(int searched,
+                                      int mismatches,
+                                      double final_wdl,
+                                      double min_wdl,
+                                      double max_wdl) {
+    return fmt::format("positions:  {}\n"
+                       "matches:    {}/{} ({} differed)\n"
+                       "final wdl:  {:+.2f}\n"
+                       "wdl range:  [{:+.2f}, {:+.2f}]\n",
+                       searched,
+                       searched - mismatches,
+                       searched,
+                       mismatches,
+                       final_wdl,
+                       min_wdl,
+                       max_wdl);
 }
 
 std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
@@ -1066,6 +1138,7 @@ std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
     output += timeout_report;
     output += formatAccuracyReport(stats);
     output += game_report;
+    output += formatGameScoreReport(stats);
 
     return output;
 }
@@ -1106,30 +1179,17 @@ std::filesystem::path tempOutputPath(size_t index) {
     return directory / fmt::format("replay-job-{}-{}.out", getpid(), index);
 }
 
+std::filesystem::path tempCsvPath(size_t index) {
+    auto directory = std::filesystem::temp_directory_path();
+    return directory / fmt::format("replay-job-{}-{}.csv", getpid(), index);
+}
+
 std::vector<std::string> effectiveSetoptions(const std::vector<std::string>& log_setoptions,
                                              int threads) {
     std::vector<std::string> setoptions = log_setoptions;
     if (threads > 0)
         setoptions.push_back(fmt::format("setoption name Threads value {}", threads));
     return setoptions;
-}
-
-std::string readFile(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file.is_open())
-        throw std::runtime_error(fmt::format("failed to open {}", path.string()));
-
-    std::ostringstream text;
-    text << file.rdbuf();
-    return text.str();
-}
-
-void writeFile(const std::filesystem::path& path, const std::string& text) {
-    std::ofstream file(path);
-    if (!file.is_open())
-        throw std::runtime_error(fmt::format("failed to write {}", path.string()));
-
-    file << text;
 }
 
 void updateReferenceScore(ReferenceResult& result, const std::string& line, int stm_sign) {
@@ -1173,11 +1233,12 @@ ReferenceResult referenceSearch(EngineProcess& engine,
 
     if (progress) {
         if (limit.kind == ReferenceLimitKind::Nodes)
-            fmt::print("\r\033[K{} nodes {}/{}", progress_text,
-                       formatNodeCount(0), formatNodeCount(target));
+            printSearchProgress(fmt::format("{} nodes {}/{}",
+                                            progress_text,
+                                            formatNodeCount(0),
+                                            formatNodeCount(target)));
         else
-            fmt::print("\r\033[K{} depth 0/{}", progress_text, target);
-        fflush(stdout);
+            printSearchProgress(fmt::format("{} depth 0/{}", progress_text, target));
     }
 
     engine.send(position);
@@ -1200,18 +1261,20 @@ ReferenceResult referenceSearch(EngineProcess& engine,
                 long long current_nodes = parseLongField(*line, "nodes");
                 if (current_nodes > 0 && current_nodes != last_reported_nodes) {
                     last_reported_nodes = current_nodes;
-                    fmt::print("\r\033[K{} nodes {}/{}", progress_text,
-                               formatNodeCount(std::min(current_nodes,
-                                                        static_cast<long long>(target))),
-                               formatNodeCount(target));
-                    fflush(stdout);
+                    printSearchProgress(fmt::format("{} nodes {}/{}",
+                                                    progress_text,
+                                                    formatNodeCount(std::min(current_nodes,
+                                                                             static_cast<long long>(target))),
+                                                    formatNodeCount(target)));
                 }
             } else {
                 int current_depth = extractDepth(*line);
                 if (current_depth > 0 && current_depth != last_reported_depth) {
                     last_reported_depth = current_depth;
-                    fmt::print("\r\033[K{} depth {}/{}", progress_text, current_depth, target);
-                    fflush(stdout);
+                    printSearchProgress(fmt::format("{} depth {}/{}",
+                                                    progress_text,
+                                                    current_depth,
+                                                    target));
                 }
             }
         }
@@ -1231,7 +1294,8 @@ MoveValidation validateMove(EngineProcess& reference,
                             int display_total,
                             bool progress,
                             std::string_view progress_verb = "analyzing",
-                            bool reset_reference = true) {
+                            bool reset_reference = true,
+                            ReferenceScoringMode scoring_mode = ReferenceScoringMode::ConsecutivePosition) {
     MoveValidation validation;
     if (played_move.empty() || played_move == "(none)") {
         validation.error = "no played move";
@@ -1256,27 +1320,44 @@ MoveValidation validateMove(EngineProcess& reference,
     int mover_sign = sideToMoveSign(position);
     validation.before_score_white = best.score_white;
     Score best_score = scoreForSide(best.score_white, mover_sign);
-    validation.best_display = formatMoveWithAlgebra(position, best.bestmove);
+    validation.best_display = formatMoveDisplay(position, best.bestmove);
     validation.best_score = formatScore(best_score);
     validation.ply_before = plyBeforeMove(position, fullmove);
     validation.ply_after = validation.ply_before + 1;
 
     validation.reference_best = best.bestmove == played_move;
+    validation.consecutive_position_scores = scoring_mode == ReferenceScoringMode::ConsecutivePosition;
 
-    auto played_position = positionAfterMove(position, played_move);
-    if (!played_position) {
-        validation.error = "could not apply played move";
-        return validation;
+    ReferenceResult played;
+    if (scoring_mode == ReferenceScoringMode::RootSearchmoves) {
+        if (validation.reference_best) {
+            played = best;
+        } else {
+            played = referenceSearch(reference,
+                                     position,
+                                     resolved_limit,
+                                     progress,
+                                     fmt::format("{} [{}/{}] played-move",
+                                                 progress_verb, fullmove, display_total),
+                                     played_move,
+                                     true);
+        }
+    } else {
+        auto played_position = positionAfterMove(position, played_move);
+        if (!played_position) {
+            validation.error = "could not apply played move";
+            return validation;
+        }
+
+        played = referenceSearch(reference,
+                                 *played_position,
+                                 resolved_limit,
+                                 progress,
+                                 fmt::format("{} [{}/{}] played-position",
+                                             progress_verb, fullmove, display_total),
+                                 "",
+                                 false);
     }
-
-    ReferenceResult played = referenceSearch(reference,
-                                            *played_position,
-                                            resolved_limit,
-                                            progress,
-                                            fmt::format("{} [{}/{}] played-position",
-                                                        progress_verb, fullmove, display_total),
-                                            "",
-                                            false);
     if (!played.has_score) {
         validation.error = "reference returned no score";
         return validation;
@@ -1289,8 +1370,14 @@ MoveValidation validateMove(EngineProcess& reference,
     validation.cp_loss = lichessCpLoss(best.score_white, played.score_white, mover_sign);
     validation.accuracy = lichessAccuracy(best_score, played_score);
     validation.label = lichessJudgement(best_score, played_score);
-    if (validation.cp_loss == 0 && isReportableJudgement(validation.label))
+    if (validation.reference_best) {
+        validation.after_score_white = validation.before_score_white;
+        validation.cp_loss = 0;
+        validation.accuracy = 100.0;
         validation.label.clear();
+    } else if (validation.cp_loss == 0 && isReportableJudgement(validation.label)) {
+        validation.label.clear();
+    }
     return validation;
 }
 
@@ -1365,7 +1452,7 @@ std::unordered_map<int, PositionEvaluation> analyzeFishnetPositionSequence(Engin
     }
 
     if (progress)
-        fmt::print("\r\033[K");
+        clearSearchProgress();
 
     return evaluations;
 }
@@ -1397,15 +1484,21 @@ MoveValidation validationFromPositionEvaluations(const LogEntry& entry,
 
     Score best_score = scoreForSide(validation.before_score_white, mover_sign);
     Score played_score = scoreForSide(validation.after_score_white, mover_sign);
-    validation.best_display = formatMoveWithAlgebra(entry.position, validation.bestmove);
+    validation.best_display = formatMoveDisplay(entry.position, validation.bestmove);
     validation.best_score = formatScore(best_score);
     validation.cp_loss = lichessCpLoss(validation.before_score_white,
                                        validation.after_score_white,
                                        mover_sign);
     validation.accuracy = lichessAccuracy(best_score, played_score);
     validation.label = lichessJudgement(best_score, played_score);
-    if (validation.cp_loss == 0 && isReportableJudgement(validation.label))
+    if (validation.reference_best) {
+        validation.after_score_white = validation.before_score_white;
+        validation.cp_loss = 0;
+        validation.accuracy = 100.0;
         validation.label.clear();
+    } else if (validation.cp_loss == 0 && isReportableJudgement(validation.label)) {
+        validation.label.clear();
+    }
     validation.ok = true;
     return validation;
 }
@@ -1426,11 +1519,12 @@ void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
     stats.moves++;
     stats.cp_loss += validation.cp_loss;
     stats.accuracy += validation.accuracy;
+    stats.harmonic_accuracy_denominator += 1.0 / std::max(1.0, validation.accuracy);
     if (stats.side_sign == 0)
         stats.side_sign = sideToMoveSign(entry.position);
-    if (validation.ply_before > 0)
+    if (validation.consecutive_position_scores && validation.ply_before > 0)
         stats.ply_scores.push_back({validation.ply_before, validation.before_score_white});
-    if (validation.ply_after > 0)
+    if (validation.consecutive_position_scores && validation.ply_after > 0)
         stats.ply_scores.push_back({validation.ply_after, validation.after_score_white});
 
     if (!isReportableJudgement(validation.label))
@@ -1473,7 +1567,7 @@ void analyzeLoggedMoves(EngineProcess& reference,
                                                  "analyzing",
                                                  false);
         if (progress)
-            fmt::print("\r\033[K");
+            clearSearchProgress();
         if (print_move_output)
             printLogMoveLine(entry, display_total, line_widths,
                              validation, color, include_fen);
@@ -1595,7 +1689,7 @@ SearchResult waitForBestmove(EngineProcess& engine,
 
         if (startsWith(*line, "bestmove ")) {
             if (progress)
-                fmt::print("\r\033[K");
+                clearSearchProgress();
             return {extractMove(*line), diagnostics, wdl, mate_in};
         }
     }
@@ -1604,7 +1698,8 @@ SearchResult waitForBestmove(EngineProcess& engine,
 }
 
 ParsedLog readLog(const std::filesystem::path& logfile,
-                  long long max_replay_nodes) {
+                  long long max_replay_nodes,
+                  long long fixed_replay_nodes) {
     std::ifstream file(logfile);
     if (!file.is_open())
         throw std::runtime_error(fmt::format("failed to open logfile: {}", logfile.string()));
@@ -1639,7 +1734,8 @@ ParsedLog readLog(const std::filesystem::path& logfile,
         if (pending_depth <= 0)
             pending_depth = 1;
         std::string replay_go = replayGoCommand(pending_go, pending_nodes,
-                                                max_replay_nodes);
+                                                max_replay_nodes,
+                                                fixed_replay_nodes);
         if (pending_fen.empty()) {
             auto board = boardFromPosition(pending_position);
             if (board)
@@ -1731,159 +1827,6 @@ ParsedLog readLog(const std::filesystem::path& logfile,
     return parsed;
 }
 
-bool isPgnResultToken(std::string_view token) {
-    return token == "1-0"
-        || token == "0-1"
-        || token == "1/2-1/2"
-        || token == "1-1"
-        || token == "*";
-}
-
-std::string stripPgnMoveNumber(std::string token) {
-    size_t pos = 0;
-    while (pos < token.size() && std::isdigit((unsigned char)token[pos]))
-        pos++;
-
-    if (pos == 0 || pos == token.size() || token[pos] != '.')
-        return token;
-
-    while (pos < token.size() && token[pos] == '.')
-        pos++;
-
-    return token.substr(pos);
-}
-
-bool isPgnMoveNumberOnly(std::string_view token) {
-    bool saw_dot = false;
-    for (char ch : token) {
-        if (ch == '.') {
-            saw_dot = true;
-            continue;
-        }
-        if (!std::isdigit((unsigned char)ch))
-            return false;
-    }
-    return saw_dot;
-}
-
-std::optional<int> pgnMainlinePlyCount(const std::filesystem::path& pgn_path) {
-    if (!std::filesystem::exists(pgn_path))
-        return std::nullopt;
-
-    std::string text = readFile(pgn_path);
-    int ply_count = 0;
-    int variation_depth = 0;
-    bool in_brace = false;
-    bool in_tag = false;
-    bool in_semicolon = false;
-    bool line_start = true;
-    std::string token;
-
-    auto flush_token = [&] {
-        if (token.empty())
-            return;
-
-        std::string move = stripPgnMoveNumber(token);
-        while (!move.empty() && (move.back() == '!' || move.back() == '?'))
-            move.pop_back();
-
-        if (!move.empty()
-         && move.front() != '$'
-         && !isPgnResultToken(move)
-         && !isPgnMoveNumberOnly(move))
-            ply_count++;
-
-        token.clear();
-    };
-
-    for (char ch : text) {
-        if (in_semicolon) {
-            if (ch == '\n') {
-                in_semicolon = false;
-                line_start = true;
-            }
-            continue;
-        }
-
-        if (in_tag) {
-            if (ch == ']')
-                in_tag = false;
-            if (ch == '\n')
-                line_start = true;
-            continue;
-        }
-
-        if (in_brace) {
-            if (ch == '}')
-                in_brace = false;
-            continue;
-        }
-
-        if (std::isspace((unsigned char)ch)) {
-            flush_token();
-            if (ch == '\n')
-                line_start = true;
-            continue;
-        }
-
-        if (line_start && ch == '[') {
-            flush_token();
-            in_tag = true;
-            continue;
-        }
-
-        line_start = false;
-
-        if (ch == ';') {
-            flush_token();
-            in_semicolon = true;
-            continue;
-        }
-
-        if (ch == '{') {
-            flush_token();
-            in_brace = true;
-            continue;
-        }
-
-        if (ch == '(') {
-            flush_token();
-            variation_depth++;
-            continue;
-        }
-
-        if (ch == ')') {
-            flush_token();
-            if (variation_depth > 0)
-                variation_depth--;
-            continue;
-        }
-
-        if (variation_depth > 0)
-            continue;
-
-        token.push_back(ch);
-    }
-
-    flush_token();
-    return ply_count;
-}
-
-void trimPostGameEntriesFromSiblingPgn(std::vector<LogEntry>& entries,
-                                       const std::filesystem::path& logfile) {
-    auto pgn_path = logfile;
-    pgn_path.replace_extension(".pgn");
-
-    auto ply_count = pgnMainlinePlyCount(pgn_path);
-    if (!ply_count || *ply_count <= 0)
-        return;
-
-    entries.erase(std::remove_if(entries.begin(), entries.end(),
-        [&](const LogEntry& entry) {
-            return moveCountFromPosition(entry.position) >= *ply_count;
-        }), entries.end());
-}
-
 bool containsArgIndex(const std::vector<int>& indices, int value) {
     return std::find(indices.begin(), indices.end(), value) != indices.end();
 }
@@ -1973,7 +1916,8 @@ std::string batchCommand(char* argv[],
                          int argc,
                          const std::vector<int>& logfile_arg_indices,
                          const std::filesystem::path& log,
-                         const std::filesystem::path& output_path) {
+                         const std::filesystem::path& output_path,
+                         const std::filesystem::path& csv_output_path) {
     std::string command = shellQuote(argv[0]);
     bool inserted_log = false;
     for (int arg = 1; arg < argc; ++arg) {
@@ -1981,6 +1925,8 @@ std::string batchCommand(char* argv[],
             arg++;
             continue;
         }
+        if (std::string(argv[arg]) == "--csv")
+            continue;
 
         if (containsArgIndex(logfile_arg_indices, arg)) {
             if (!inserted_log) {
@@ -1994,7 +1940,15 @@ std::string batchCommand(char* argv[],
     if (!inserted_log)
         command += " " + shellQuote(log.string());
 
-    command += " > " + shellQuote(output_path.string()) + " 2>&1";
+    if (!csv_output_path.empty())
+        command += " --csv";
+
+    if (!csv_output_path.empty()) {
+        command += " > " + shellQuote(csv_output_path.string());
+        command += " 2> " + shellQuote(output_path.string());
+    } else {
+        command += " > " + shellQuote(output_path.string()) + " 2>&1";
+    }
     return command;
 }
 
@@ -2002,6 +1956,7 @@ struct RunningJob {
     pid_t pid = -1;
     size_t index = 0;
     std::filesystem::path output_path;
+    std::filesystem::path csv_output_path;
     std::chrono::steady_clock::time_point started;
 };
 
@@ -2023,7 +1978,7 @@ void terminateJobs(const std::vector<RunningJob>& running) {
         waitpid(job.pid, nullptr, 0);
 }
 
-void printJobOutput(const std::filesystem::path& path) {
+void printJobOutput(const std::filesystem::path& path, bool to_stderr) {
     std::ifstream file(path);
     if (!file.is_open())
         return;
@@ -2032,47 +1987,40 @@ void printJobOutput(const std::filesystem::path& path) {
     while (std::getline(file, line)) {
         if (startsWith(line, kBatchProgressPrefix))
             continue;
-        fmt::print("{}\n", line);
+        fmt::print(to_stderr ? stderr : stdout, "{}\n", line);
     }
 }
 
-std::string lastJobProgress(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file.is_open())
-        return "";
+void appendCsvOutput(const std::filesystem::path& source,
+                     bool& wrote_header,
+                     std::ostream& output) {
+    if (source.empty())
+        return;
+
+    std::ifstream input(source);
+    if (!input.is_open())
+        return;
 
     std::string line;
-    std::string latest;
-    while (std::getline(file, line)) {
-        if (startsWith(line, kBatchProgressPrefix))
-            latest = line.substr(std::string_view(kBatchProgressPrefix).size());
+    bool first_line = true;
+    while (std::getline(input, line)) {
+        if (first_line) {
+            first_line = false;
+            if (wrote_header)
+                continue;
+            wrote_header = true;
+        }
+        output << line << '\n';
     }
-    return latest;
-}
-
-void printBatchProgress(const std::vector<RunningJob>& running,
-                        const std::vector<std::filesystem::path>& logs,
-                        size_t completed) {
-    auto oldest = running.front();
-    for (const auto& job : running) {
-        if (job.started < oldest.started)
-            oldest = job;
-    }
-
-    std::string latest = lastJobProgress(oldest.output_path);
-    fmt::print("progress: {}/{} done, {} running | {}{}\n",
-               completed,
-               logs.size(),
-               running.size(),
-               logs[oldest.index].filename().string(),
-               latest.empty() ? "" : " | " + latest);
-    std::fflush(stdout);
 }
 
 int waitForBatchJob(const RunningJob& job,
                     const std::vector<std::filesystem::path>& logs,
-                    size_t completed) {
-    auto last_progress = std::chrono::steady_clock::now();
+                    size_t completed,
+                    bool progress_to_stderr = false) {
+    (void)logs;
+    (void)completed;
+    (void)progress_to_stderr;
     while (true) {
         int status = 0;
         pid_t done = waitpid(job.pid, &status, WNOHANG);
@@ -2085,11 +2033,6 @@ int waitForBatchJob(const RunningJob& job,
             throw std::runtime_error(fmt::format("waitpid failed: {}", strerror(errno)));
         }
         if (done == 0) {
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_progress >= std::chrono::seconds(10)) {
-                printBatchProgress(std::vector<RunningJob>{job}, logs, completed);
-                last_progress = now;
-            }
             usleep(100000);
             continue;
         }
@@ -2102,7 +2045,8 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             int argc,
             char* argv[],
             const std::vector<int>& logfile_arg_indices,
-            int jobs) {
+            int jobs,
+            bool csv_output) {
     if (logs.empty()) {
         fmt::print(stderr, "ERROR: No .log files found\n");
         return 1;
@@ -2111,22 +2055,29 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         jobs = 1;
 
     int failures = 0;
+    bool wrote_csv_header = false;
     setenv(kReplayBatch, "1", 1);
     if (jobs <= 1) {
         for (size_t i = 0; i < logs.size(); ++i) {
-            fmt::print("\n[{}/{}] {}\n", i + 1, logs.size(), logs[i].filename().string());
-            std::fflush(stdout);
+            fmt::print(csv_output ? stderr : stdout,
+                       "\n[{}/{}] {}\n", i + 1, logs.size(), logs[i].filename().string());
+            std::fflush(csv_output ? stderr : stdout);
 
             auto output_path = tempOutputPath(i);
+            auto csv_output_path = csv_output ? tempCsvPath(i) : std::filesystem::path{};
             std::string command = batchCommand(argv, argc, logfile_arg_indices,
-                                               logs[i], output_path);
+                                               logs[i], output_path, csv_output_path);
             pid_t pid = startBatchJob(command);
             if (pid < 0)
                 throw std::runtime_error(fmt::format("failed to start job: {}", strerror(errno)));
-            int rc = waitForBatchJob({pid, i, output_path, std::chrono::steady_clock::now()},
-                                     logs, i);
-            printJobOutput(output_path);
+            int rc = waitForBatchJob({pid, i, output_path, csv_output_path,
+                                      std::chrono::steady_clock::now()},
+                                     logs, i, csv_output);
+            printJobOutput(output_path, csv_output);
+            appendCsvOutput(csv_output_path, wrote_csv_header, std::cout);
             std::filesystem::remove(output_path);
+            if (!csv_output_path.empty())
+                std::filesystem::remove(csv_output_path);
             if (rc == 128 + SIGINT || interruptedStatus(rc))
                 return 128 + SIGINT;
             if (rc != 0)
@@ -2137,33 +2088,43 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
 
     std::vector<RunningJob> running;
     std::vector<std::filesystem::path> output_paths(logs.size());
+    std::vector<std::filesystem::path> csv_output_paths(logs.size());
     size_t next = 0;
     size_t completed = 0;
-    fmt::print("Running {} logs with {} jobs; output prints as each log finishes.\n",
+    fmt::print(csv_output ? stderr : stdout,
+               "Running {} logs with {} jobs; output prints as each log finishes.\n",
                logs.size(), jobs);
-    std::fflush(stdout);
+    std::fflush(csv_output ? stderr : stdout);
 
     auto launch_next = [&] {
         auto output_path = tempOutputPath(next);
+        auto csv_output_path = csv_output ? tempCsvPath(next) : std::filesystem::path{};
         std::string command = batchCommand(argv, argc, logfile_arg_indices,
-                                           logs[next], output_path);
+                                           logs[next], output_path, csv_output_path);
         pid_t pid = startBatchJob(command);
         if (pid < 0)
             throw std::runtime_error(fmt::format("failed to start job: {}", strerror(errno)));
         output_paths[next] = output_path;
-        running.push_back({pid, next, output_path, std::chrono::steady_clock::now()});
+        csv_output_paths[next] = csv_output_path;
+        running.push_back({pid, next, output_path, csv_output_path,
+                           std::chrono::steady_clock::now()});
         if (completed == 0) {
-            fmt::print("analyzing [{}/{}] {}\n", next + 1, logs.size(), logs[next].filename().string());
-            std::fflush(stdout);
+            fmt::print(csv_output ? stderr : stdout,
+                       "analyzing [{}/{}] {}\n", next + 1, logs.size(), logs[next].filename().string());
+            std::fflush(csv_output ? stderr : stdout);
         }
         next++;
     };
     auto print_finished = [&](const RunningJob& job, int status) {
-        fmt::print("\n[{}/{}] {}\n",
+        fmt::print(csv_output ? stderr : stdout,
+                   "\n[{}/{}] {}\n",
                    job.index + 1, logs.size(), logs[job.index].filename().string());
-        printJobOutput(job.output_path);
+        printJobOutput(job.output_path, csv_output);
+        appendCsvOutput(job.csv_output_path, wrote_csv_header, std::cout);
         std::filesystem::remove(job.output_path);
-        std::fflush(stdout);
+        if (!job.csv_output_path.empty())
+            std::filesystem::remove(job.csv_output_path);
+        std::fflush(csv_output ? stderr : stdout);
 
         if (interruptedStatus(status)) {
             terminateJobs(running);
@@ -2179,7 +2140,6 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         while (next < logs.size() && running.size() < (size_t)jobs)
             launch_next();
 
-        auto last_progress = std::chrono::steady_clock::now();
         while (!running.empty()) {
             int status = 0;
             pid_t done = waitpid(-1, &status, WNOHANG);
@@ -2191,11 +2151,6 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
                 throw std::runtime_error(fmt::format("waitpid failed: {}", strerror(errno)));
             }
             if (done == 0) {
-                auto now = std::chrono::steady_clock::now();
-                if (now - last_progress >= std::chrono::seconds(10)) {
-                    printBatchProgress(running, logs, completed);
-                    last_progress = now;
-                }
                 usleep(100000);
                 continue;
             }
@@ -2213,8 +2168,6 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
                 return 128 + SIGINT;
             if (next < logs.size()) {
                 launch_next();
-                printBatchProgress(running, logs, completed);
-                last_progress = std::chrono::steady_clock::now();
             }
         }
     } catch (...) {
@@ -2222,6 +2175,10 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         for (const auto& output_path : output_paths) {
             if (!output_path.empty())
                 std::filesystem::remove(output_path);
+        }
+        for (const auto& csv_output_path : csv_output_paths) {
+            if (!csv_output_path.empty())
+                std::filesystem::remove(csv_output_path);
         }
         throw;
     }
@@ -2241,14 +2198,15 @@ int main(int argc, char* argv[]) {
     int threads = -1;
     int jobs = 1;
     long long max_replay_nodes = kDefaultMaxReplayNodes;
-    ReferenceLimit reference_limit;
+    long long fixed_replay_nodes = kDefaultFixedReplayNodes;
+    ReferenceLimit reference_limit{ReferenceLimitKind::Nodes, kDefaultReplayReferenceNodes};
     std::string analysis_target = "replay";
+    bool csv_output = false;
     bool time_mode = false;
     bool analyze = true;
     bool verbose = false;
     bool color_output = false;
-    bool force = false;
-    bool print_move_output = true;
+    bool print_move_output = false;
     bool engine_path_explicit = false;
     std::vector<std::pair<int, std::string>> positional_args;
 
@@ -2257,34 +2215,33 @@ int main(int argc, char* argv[]) {
             "Usage: {} [options] [engine] <logfile-or-directory> [more logs...]\n"
             "\n"
             "Replay UCI log searches and compare engine output with logged moves.\n"
-            "Candidate replay uses the logged final node count when available.\n"
+            "Candidate replay uses logged nodes capped at 300k unless another replay budget is set.\n"
             "Multiple log paths are treated as batch input; non-.log paths are ignored.\n"
             "Use '-' or pipe newline-separated paths on stdin to read log targets from stdin.\n"
             "At the end, analyze replayed moves with a reference engine.\n"
-            "Replay reports are saved as <log>.<analysis-key>_analysis.\n"
-            "Log reports are saved as <log>.analysis.\n"
             "\n"
             "Options:\n"
             "  --engine <path>     Engine binary to replay with (default: enyo)\n"
             "  --candidate <path>  Alias for --engine\n"
             "  --reference <path>  Reference engine for blunder analysis (default: stockfish)\n"
-            "  --ref-nodes N       Reference analysis nodes; default uses 857142 nodes\n"
+            "  --ref-nodes N       Reference analysis nodes (default: 200000)\n"
             "  --ref-depth N       Reference analysis depth instead of nodes; 0 follows logged depth\n"
             "  --log               Analyze logged moves instead of replayed moves;\n"
             "                      does not run the candidate engine\n"
             "  --no-analysis       Replay only; do not run reference analysis\n"
-            "  --summary-only      Skip per-move output; print final summaries only\n"
+            "  --moves             Print per-position replay lines\n"
             "  --move N            Start at fullmove N\n"
             "  --count N           Replay at most N logged engine moves\n"
             "  --max-replay-nodes N\n"
-            "                      Cap candidate replay nodes (default: 100000000, 0 disables)\n"
+            "                      Use logged nodes capped at N; 0 disables the cap\n"
+            "  --fixed-nodes N     Replay candidate with exactly N nodes per position\n"
+            "  --csv               Write per-position replay analysis rows to stdout\n"
             "  --time              Replay with the original logged go wtime/btime command;\n"
             "                      ignored with --log and overrides logged-node replay\n"
             "  --threads N         Send `setoption name Threads value N`\n"
             "  --jobs N            Run up to N logs in parallel in batch mode (default: 1)\n"
-            "  --force             Ignore existing analysis files and analyze again\n"
             "  --color             Color judgement output\n"
-            "  --verbose, -v       Print full UCI traffic, cache hashes, and FENs\n"
+            "  --verbose, -v       Print full UCI traffic and FENs\n"
             "  --help, -h          Show this help and exit\n",
             prog);
     };
@@ -2310,26 +2267,31 @@ int main(int argc, char* argv[]) {
             analysis_target = "log";
         } else if (arg == "--no-analysis") {
             analyze = false;
-        } else if (arg == "--summary-only") {
-            print_move_output = false;
+        } else if (arg == "--moves") {
+            print_move_output = true;
         } else if (arg == "--move" && i + 1 < argc) {
             start_move = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--count" && i + 1 < argc) {
             count = std::max(0, std::stoi(argv[++i]));
         } else if (arg == "--max-replay-nodes" && i + 1 < argc) {
             max_replay_nodes = std::max(0LL, std::stoll(argv[++i]));
+            fixed_replay_nodes = 0;
+        } else if (arg == "--fixed-nodes" && i + 1 < argc) {
+            fixed_replay_nodes = std::max(1LL, std::stoll(argv[++i]));
+        } else if (arg == "--csv") {
+            csv_output = true;
         } else if (arg == "--threads" && i + 1 < argc) {
             threads = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--jobs" && i + 1 < argc) {
             jobs = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--time") {
             time_mode = true;
-        } else if (arg == "--force") {
-            force = true;
+            fixed_replay_nodes = 0;
         } else if (arg == "--color") {
             color_output = true;
         } else if (arg == "--verbose" || arg == "-v") {
             verbose = true;
+            print_move_output = true;
         } else if (arg.rfind("--", 0) == 0) {
             fmt::print(stderr, "Unknown or malformed option: {}\n", arg);
             return 1;
@@ -2384,10 +2346,21 @@ int main(int argc, char* argv[]) {
         fmt::print(stderr, "ERROR: --log cannot be used with --no-analysis\n");
         return 1;
     }
+    if (csv_output && analysis_target == "log") {
+        fmt::print(stderr, "ERROR: --csv is only supported for replay mode\n");
+        return 1;
+    }
+    if (csv_output && !analyze) {
+        fmt::print(stderr, "ERROR: --csv needs reference analysis; remove --no-analysis\n");
+        return 1;
+    }
+    if (csv_output)
+        print_move_output = false;
+    if (fixed_replay_nodes > 0 && time_mode) {
+        fmt::print(stderr, "ERROR: --fixed-nodes cannot be combined with --time\n");
+        return 1;
+    }
 
-    bool cache_enabled = analyze
-                      && start_move == 0
-                      && count < 0;
     bool stdin_input = std::find(logfile_targets.begin(), logfile_targets.end(), "-") != logfile_targets.end();
 
     bool logfile_is_directory = !batch_input && std::filesystem::is_directory(logfile);
@@ -2405,7 +2378,8 @@ int main(int argc, char* argv[]) {
     }
 
     if (run_as_batch)
-        return runLogs(collectLogTargets(logfile_targets), argc, argv, logfile_arg_indices, jobs);
+        return runLogs(collectLogTargets(logfile_targets), argc, argv,
+                       logfile_arg_indices, jobs, csv_output);
 
     if (std::filesystem::path(logfile).extension() != ".log") {
         fmt::print(stderr, "ERROR: replay needs a .log file.\n");
@@ -2414,82 +2388,24 @@ int main(int argc, char* argv[]) {
 
     try {
         std::filesystem::path logfile_path = logfile;
-        std::filesystem::path report_path;
-        ParsedLog parsed = readLog(logfile, max_replay_nodes);
+        ParsedLog parsed = readLog(logfile, max_replay_nodes, fixed_replay_nodes);
         std::vector<LogEntry> entries = parsed.entries;
-        trimPostGameEntriesFromSiblingPgn(entries, logfile_path);
         if (entries.empty()) {
             fmt::print(stderr, "ERROR: No UCI go/bestmove pairs found in '{}'\n", logfile);
             return 1;
         }
 
-        std::optional<AnalysisCache> cache;
         LogEntry final_log_entry = entries.back();
         std::vector<LogEntry> full_log_entries = entries;
         std::string full_log_timeout_report = formatTimeoutReport(entries, final_log_entry.fullmove);
         std::string full_log_game_report = formatGameStatusReport(entries, full_log_timeout_report);
         bool needs_candidate = !analyze || analysis_target != "log";
-        if (cache_enabled) {
-            if (needs_candidate && !executableExists(engine_path)) {
-                fmt::print(stderr, "ERROR: Engine '{}' not found or not executable\n", engine_path);
-                return 1;
-            }
-            if (!executableExists(reference_path)) {
-                fmt::print(stderr, "ERROR: Reference engine '{}' not found or not executable\n", reference_path);
-                fmt::print(stderr, "Use --reference <path> or --no-analysis.\n");
-                return 1;
-            }
-
-            EngineConfig candidate_config = analysis_target == "log"
-                ? EngineConfig{"unused", "none"}
-                : probeEngineConfig(engine_path, effectiveSetoptions(parsed.setoptions, threads));
-            auto reference_config = probeEngineConfig(reference_path, {});
-            cache = buildAnalysisCache(logfile_path, candidate_config, reference_config,
-                                       time_mode, max_replay_nodes,
-                                       reference_limit, analysis_target);
-            report_path = analysisPath(logfile_path, cache->key, analysis_target);
-
-            if (!force && std::filesystem::exists(report_path)) {
-                bool batch_mode = batchMode();
-                std::string cached_report = readFile(report_path);
-                std::string cached_body = cached_report;
-                std::string cached_provenance;
-                if (startsWith(cached_report, "analysis-key ")) {
-                    size_t newline = cached_report.find('\n');
-                    cached_provenance = cached_report.substr(0, newline);
-                    cached_body = newline == std::string::npos ? "" : cached_report.substr(newline + 1);
-                }
-                if (cached_provenance == cache->provenance) {
-                    std::string updated_body = replaceDerivedReportLines(cached_body,
-                                                                         full_log_game_report,
-                                                                         full_log_timeout_report);
-                    if (updated_body != cached_body) {
-                        cached_body = updated_body;
-                        std::string updated_report = cached_provenance + "\n" + cached_body;
-                        writeFile(report_path, updated_report);
-                    }
-
-                    if (!batch_mode)
-                        fmt::print("cached: {}\n", report_path.string());
-                    if (verbose)
-                        fmt::print("{}\n", cache->provenance);
-                    printBatchBlock(formatDiagnosticsReport(entries, final_log_entry.fullmove,
-                                                            color_output, verbose));
-                    printSummaryReport(cached_body, color_output, verbose);
-                    if (cached_body.empty() || cached_body.back() != '\n')
-                        fmt::print("\n");
-                    return reportTriggersFailure(cached_body) ? 1 : 0;
-                }
-            }
-        }
 
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
         if (print_move_output)
             printBatchBlock(fmt::format("Extracted {} go commands and {} logged moves\n",
                                         total_entries, total_entries));
-        if (verbose && cache)
-            fmt::print("{}\n", cache->provenance);
 
         bool full_log_range = start_move <= 0 && count < 0;
 
@@ -2536,7 +2452,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (analyze && analysis_target == "log") {
-            bool progress = isatty(STDOUT_FILENO) || batchMode();
+            bool progress = !csv_output && (isatty(STDOUT_FILENO) || batchMode());
             std::vector<AnalysisEntry> report;
             AnalysisStats stats;
             int analysis_failures = 0;
@@ -2566,20 +2482,12 @@ int main(int argc, char* argv[]) {
             std::string analysis_report_body = formatAnalysisReport(report, stats, analysis_failures,
                                                                     false, true,
                                                                     game_report, timeout_report);
-            std::string analysis_report = cache
-                ? cache->provenance + "\n" + analysis_report_body
-                : analysis_report_body;
-
-            if (cache_enabled) {
-                if (print_move_output)
-                    fmt::print("\n");
-                writeFile(report_path, analysis_report);
-                printBatchBlock(fmt::format("Analysis saved     : {}\n", report_path.string()));
-            }
 
             if (!print_move_output) {
                 printBatchBlock(formatDiagnosticsReport(entries, display_total,
                                                         color_output, verbose));
+            } else {
+                fmt::print("\n");
             }
             printSummaryReport(analysis_report_body, color_output, verbose);
             if (analysis_report_body.empty() || analysis_report_body.back() != '\n')
@@ -2601,10 +2509,16 @@ int main(int argc, char* argv[]) {
         double min_wdl = 0.0;
         double max_wdl = 0.0;
         double final_wdl = 0.0;
-        bool progress = isatty(STDOUT_FILENO) || batchMode();
+        bool progress = !csv_output && (isatty(STDOUT_FILENO) || batchMode());
         std::vector<AnalysisEntry> report;
         AnalysisStats stats;
         int analysis_failures = 0;
+        std::ostringstream csv_buffer;
+        std::ostream* csv_stream = nullptr;
+        if (csv_output) {
+            csv_stream = &csv_buffer;
+            writeCsvHeader(*csv_stream);
+        }
 
         for (const auto& entry : entries) {
             if (!engine)
@@ -2617,8 +2531,8 @@ int main(int argc, char* argv[]) {
             SearchResult result = waitForBestmove(*engine, entry, go_command, display_total, progress);
             searched++;
             bool mismatch = result.bestmove != entry.expected;
-            std::string played_display = formatMoveWithAlgebra(entry.position, result.bestmove);
-            std::string expected_display = formatMoveWithAlgebra(entry.position, entry.expected);
+            std::string played_display = formatMoveDisplay(entry.position, result.bestmove);
+            std::string expected_display = formatMoveDisplay(entry.position, entry.expected);
             if (mismatch)
                 mismatches++;
             min_wdl = std::min(min_wdl, result.wdl);
@@ -2637,15 +2551,37 @@ int main(int argc, char* argv[]) {
                                                          entry.depth,
                                                          entry.fullmove,
                                                          display_total,
-                                                         progress);
+                                                         progress,
+                                                         "analyzing",
+                                                         true,
+                                                         ReferenceScoringMode::RootSearchmoves);
                 if (progress)
-                    fmt::print("\r\033[K");
+                    clearSearchProgress();
 
                 reference_suffix = formatReferenceInline(validation, color_output);
                 appendAnalysisEntry(report, stats, analysis_failures, validation,
                                     entry, analyzed_move,
                                     analysis_target == "replay" && mismatch ? entry.expected : "",
                                     display_total);
+                if (csv_stream) {
+                    writeCsvRow(*csv_stream, {
+                        logfile_path,
+                        entry.fullmove,
+                        validation.ply_before,
+                        sideToMoveName(entry.position),
+                        entry.expected,
+                        analyzed_move,
+                        !mismatch,
+                        validation.bestmove,
+                        validation.ok ? validation.label : validation.error,
+                        validation.ok ? validation.cp_loss : 0,
+                        validation.ok ? validation.accuracy : 0.0,
+                        validation.best_score,
+                        go_command,
+                        entry.nodes,
+                        result.wdl
+                    });
+                }
             }
 
             std::string replay_display = mismatch
@@ -2672,7 +2608,11 @@ int main(int argc, char* argv[]) {
         std::string analysis_report_body;
         std::string game_report;
         std::string timeout_report;
-        bool printed_analysis_save = false;
+        std::string replay_summary_body = formatReplaySummaryReport(searched,
+                                                                     mismatches,
+                                                                     final_wdl,
+                                                                     min_wdl,
+                                                                     max_wdl);
         if (analyze) {
             bool includes_final_log_entry = !entries.empty() && sameLogEntry(entries.back(), final_log_entry);
             timeout_report = includes_final_log_entry ? full_log_timeout_report : "";
@@ -2680,30 +2620,22 @@ int main(int argc, char* argv[]) {
             analysis_report_body = formatAnalysisReport(report, stats, analysis_failures,
                                                         false, true,
                                                         game_report, timeout_report);
-            std::string analysis_report = cache
-                ? cache->provenance + "\n" + analysis_report_body
-                : analysis_report_body;
-            if (cache_enabled) {
-                fmt::print("\n");
-                writeFile(report_path, analysis_report);
-                printBatchBlock(fmt::format("Analysis saved     : {}\n", report_path.string()));
-                printed_analysis_save = true;
+            if (csv_output) {
+                std::string csv_report_body = csv_buffer.str();
+                fmt::print("{}", csv_report_body);
+                if (csv_report_body.empty() || csv_report_body.back() != '\n')
+                    fmt::print("\n");
+                return 0;
             }
-        }
 
-        printBatchBlock(fmt::format("{}=== Replay ===\n",
-                                    printed_analysis_save || !print_move_output ? "" : "\n"));
-        printBatchBlock(fmt::format("Positions replayed : {}\n", searched));
-        printBatchBlock(fmt::format("Bestmove matches   : {}/{} ({} differed)\n",
-                                    searched - mismatches, searched, mismatches));
-        printBatchBlock(fmt::format("Final WDL          : {:+.2f}\n", final_wdl));
-        printBatchBlock(fmt::format("WDL range          : [{:+.2f}, {:+.2f}]\n", min_wdl, max_wdl));
-
-        if (analyze) {
-            fmt::print("\n");
-            printSummaryReport(formatAnalysisReport(report, stats, analysis_failures, color_output, verbose,
-                                                    game_report, timeout_report),
-                               color_output, verbose);
+            std::string text_report_body = replay_summary_body + "\n" + analysis_report_body;
+            if (print_move_output)
+                printBatchBlock("\n");
+            printSummaryReport(text_report_body, color_output, verbose);
+        } else {
+            if (print_move_output)
+                printBatchBlock("\n");
+            printBatchBlock(replay_summary_body);
         }
 
         return reportTriggersFailure(analysis_report_body) ? 1 : 0;

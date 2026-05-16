@@ -107,7 +107,7 @@ EngineProcess::~EngineProcess() {
 
 void EngineProcess::send(const std::string& cmd) {
     if (impl->verbose)
-        fmt::print("uci:> {}\n", cmd);
+        fmt::print(stderr, "uci:> {}\n", cmd);
     if (fprintf(impl->engine_in, "%s\n", cmd.c_str()) < 0 || fflush(impl->engine_in) == EOF)
         throw std::runtime_error(fmt::format("engine stopped while sending command: {}", cmd));
 }
@@ -128,7 +128,7 @@ std::optional<std::string> EngineProcess::readLine(bool print_diagnostics) {
     if (!line.empty() && line.back() == '\n')
         line.pop_back();
     if (impl->verbose)
-        fmt::print("{}\n", line);
+        fmt::print(stderr, "{}\n", line);
     else if (print_diagnostics && isDiagnosticLine(line))
         fmt::print(stderr, "{}\n", stripDiagnosticFen(line));
     return line;

@@ -2618,7 +2618,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--verbose" || arg == "-v") {
             verbose = true;
             print_move_output = true;
-        } else if (arg.rfind("--", 0) == 0) {
+        } else if (startsWith(arg, "-")) {
             fmt::print(stderr, "Unknown or malformed option: {}\n", arg);
             return 1;
         } else {

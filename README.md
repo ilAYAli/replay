@@ -8,6 +8,16 @@ compares candidate moves against a baseline engine on the same positions.
 This is not a new game played forward. Each replayed position comes from the
 original log, even if the candidate move differs from the logged move.
 
+## Replay vs Log Analysis
+
+Default replay asks the current candidate engine what it would play from each
+logged position, then judges that candidate move. It answers: would this
+engine/config/version choose bad moves on these positions?
+
+`--log` skips the candidate engine and judges the original logged `bestmove`s.
+It answers: were the moves actually played in the game bad? Use this mode when
+you want a report comparable to Lichess game analysis.
+
 ## Defaults
 
 defaults:

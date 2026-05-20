@@ -7,6 +7,7 @@
 #include <memory>
 #include <poll.h>
 #include <signal.h>
+#include <string>
 #include <stdexcept>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -21,6 +22,23 @@ bool startsWith(const std::string& line, const std::string& prefix) {
 
 bool isDiagnosticLine(const std::string& line) {
     return startsWith(line, "WARNING") || startsWith(line, "ERROR");
+}
+
+std::string signalDescription(int signal_number) {
+    const char* name = strsignal(signal_number);
+    if (!name)
+        return fmt::format("signal {}", signal_number);
+    return fmt::format("signal {} ({})", signal_number, name);
+}
+
+std::optional<std::string> abnormalStatusMessage(int status) {
+    if (WIFSIGNALED(status))
+        return fmt::format("abnormal termination: engine terminated by {}",
+                           signalDescription(WTERMSIG(status)));
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+        return fmt::format("abnormal termination: engine exited with status {}",
+                           WEXITSTATUS(status));
+    return std::nullopt;
 }
 
 std::string stripDiagnosticFen(std::string line) {
@@ -39,11 +57,35 @@ struct EngineProcess::Impl {
     FILE* engine_out = nullptr;
     pid_t pid = -1;
     bool verbose = false;
+    bool status_known = false;
+    int status = 0;
+
+    bool collectExitStatus(int options) {
+        if (status_known)
+            return true;
+        if (pid <= 0)
+            return false;
+
+        int child_status = 0;
+        pid_t rc = waitpid(pid, &child_status, options);
+        if (rc == pid) {
+            pid = -1;
+            status = child_status;
+            status_known = true;
+            return true;
+        }
+        if (rc < 0 && errno == ECHILD) {
+            pid = -1;
+            return false;
+        }
+        return false;
+    }
 };
 
 EngineProcess::EngineProcess(const std::string& engine_path, bool verbose_output)
     : impl(std::make_unique<Impl>()) {
     impl->verbose = verbose_output;
+    signal(SIGPIPE, SIG_IGN);
 
     int pipe_to_engine[2];
     int pipe_from_engine[2];
@@ -100,7 +142,7 @@ EngineProcess::~EngineProcess() {
     if (impl->engine_out)
         fclose(impl->engine_out);
     if (impl->pid > 0)
-        waitpid(impl->pid, nullptr, 0);
+        impl->collectExitStatus(0);
 
     impl.reset();
 }
@@ -108,8 +150,11 @@ EngineProcess::~EngineProcess() {
 void EngineProcess::send(const std::string& cmd) {
     if (impl->verbose)
         fmt::print(stderr, "uci:> {}\n", cmd);
-    if (fprintf(impl->engine_in, "%s\n", cmd.c_str()) < 0 || fflush(impl->engine_in) == EOF)
+    if (fprintf(impl->engine_in, "%s\n", cmd.c_str()) < 0 || fflush(impl->engine_in) == EOF) {
+        if (auto abnormal = abnormalTermination())
+            throw std::runtime_error(*abnormal);
         throw std::runtime_error(fmt::format("engine stopped while sending command: {}", cmd));
+    }
 }
 
 bool EngineProcess::waitReadable(int timeout_ms) {
@@ -121,8 +166,11 @@ bool EngineProcess::waitReadable(int timeout_ms) {
 
 std::optional<std::string> EngineProcess::readLine(bool print_diagnostics) {
     char buffer[8192];
-    if (!fgets(buffer, sizeof(buffer), impl->engine_out))
+    if (!fgets(buffer, sizeof(buffer), impl->engine_out)) {
+        if (auto abnormal = abnormalTermination())
+            throw std::runtime_error(*abnormal);
         return std::nullopt;
+    }
 
     std::string line(buffer);
     if (!line.empty() && line.back() == '\n')
@@ -138,20 +186,28 @@ bool EngineProcess::hasExited() {
     if (impl->pid <= 0)
         return true;
 
-    int status = 0;
-    pid_t rc = waitpid(impl->pid, &status, WNOHANG);
-    if (rc == impl->pid) {
-        impl->pid = -1;
-        return true;
-    }
-    return false;
+    return impl->collectExitStatus(WNOHANG);
+}
+
+std::optional<std::string> EngineProcess::abnormalTermination() {
+    impl->collectExitStatus(WNOHANG);
+    if (!impl->status_known)
+        return std::nullopt;
+    return abnormalStatusMessage(impl->status);
+}
+
+std::string EngineProcess::terminationMessage(const std::string& context) {
+    if (auto abnormal = abnormalTermination())
+        return *abnormal + " " + context;
+    return "engine exited " + context;
 }
 
 void waitForToken(EngineProcess& engine, const std::string& token) {
     while (true) {
         if (!engine.waitReadable(30000)) {
             if (engine.hasExited())
-                throw std::runtime_error(fmt::format("engine exited while waiting for {}", token));
+                throw std::runtime_error(engine.terminationMessage(
+                    fmt::format("while waiting for {}", token)));
             throw std::runtime_error(fmt::format("timed out waiting for {}", token));
         }
 

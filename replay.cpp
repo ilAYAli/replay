@@ -105,6 +105,8 @@ struct AnalysisEntry {
     std::string played;
     std::string expected;
     std::string best;
+    std::string eval_before;
+    std::string eval_after;
     std::string fen;
     int fullmove = 1;
     int display_total = 1;
@@ -183,6 +185,7 @@ struct ComparisonStats {
 struct AnalysisWidths {
     size_t played = 4;
     size_t best = 4;
+    size_t eval = 4;
     size_t loss = 4;
 };
 
@@ -901,11 +904,18 @@ std::string analysisPlayedText(const AnalysisEntry& entry) {
     return played;
 }
 
+std::string analysisEvalText(const AnalysisEntry& entry) {
+    if (entry.eval_before.empty() || entry.eval_after.empty())
+        return "";
+    return fmt::format("{} -> {}", entry.eval_before, entry.eval_after);
+}
+
 AnalysisWidths analysisWidths(const std::vector<AnalysisEntry>& entries) {
     AnalysisWidths widths;
     for (const auto& entry : entries) {
         widths.played = std::max(widths.played, analysisPlayedText(entry).size());
         widths.best = std::max(widths.best, entry.best.size());
+        widths.eval = std::max(widths.eval, analysisEvalText(entry).size());
         widths.loss = std::max(widths.loss, fmt::format("{}cp", entry.cp_loss).size());
     }
     return widths;
@@ -917,9 +927,10 @@ std::string formatAnalysisEntry(const AnalysisEntry& entry,
                                 bool include_fen) {
     std::string label = colorizeJudgementToken(fmt::format("{:<11}", entry.label + ":"),
                                                entry.label, color);
-    std::string line = fmt::format("{} {:<{}}  best: {:<{}}  loss: {:>{}}",
+    std::string line = fmt::format("{} {:<{}}  best: {:<{}}  eval: {:<{}}  loss: {:>{}}",
                                    label, analysisPlayedText(entry), widths.played,
                                    entry.best, widths.best,
+                                   analysisEvalText(entry), widths.eval,
                                    fmt::format("{}cp", entry.cp_loss), widths.loss);
     if (include_fen && !entry.fen.empty())
         line += "  FEN: " + entry.fen;
@@ -1195,7 +1206,7 @@ std::string formatReplaySummaryReport(int searched,
                        max_wdl);
 }
 
-std::string formatSignedCp(int value) {
+std::string formatSignedCp(long long value) {
     return fmt::format("{:+}cp", value);
 }
 
@@ -1254,14 +1265,18 @@ std::string formatComparisonReport(const std::vector<ComparisonEntry>& report,
     if (stats.failures > 0)
         output += fmt::format("Analysis failures  : {}\n", stats.failures);
 
-    output += fmt::format("candidate better:  {}\n"
+    output += fmt::format("positions:         {}\n"
+                          "candidate better:  {}\n"
                           "reference better:  {}\n"
+                          "equal:             {}\n"
                           "diff:              {}\n"
                           "median diff:       {}\n"
                           "worst regression:  {}\n"
                           "best gain:         {}\n",
+                          stats.positions,
                           stats.candidate_better,
                           stats.reference_better,
+                          stats.equal,
                           formatSignedCp(static_cast<int>(stats.delta_loss)),
                           formatSignedCp(medianComparisonDiff(stats.nonzero_diffs)),
                           formatSignedCp(stats.worst_regression),
@@ -1786,6 +1801,8 @@ void appendAnalysisEntry(std::vector<AnalysisEntry>& report,
         analyzed_move,
         expected_move,
         validation.bestmove,
+        formatScore(scoreForSide(validation.before_score_white, sideToMoveSign(entry.position))),
+        formatScore(scoreForSide(validation.after_score_white, sideToMoveSign(entry.position))),
         entry.fen,
         entry.fullmove,
         display_total,
@@ -2311,6 +2328,162 @@ void appendCsvOutput(const std::filesystem::path& source,
     }
 }
 
+struct BatchComparisonLogSummary {
+    int positions = 0;
+    int candidate_better = 0;
+    int reference_better = 0;
+    int equal = 0;
+    int diff = 0;
+    int worst_regression = 0;
+    int best_gain = 0;
+};
+
+struct BatchComparisonSummary {
+    int logs = 0;
+    int candidate_logs = 0;
+    int reference_logs = 0;
+    int equal_logs = 0;
+    long long positions = 0;
+    long long candidate_better = 0;
+    long long reference_better = 0;
+    long long equal = 0;
+    long long diff = 0;
+    int worst_regression = 0;
+    int best_gain = 0;
+    bool has_worst_regression = false;
+    bool has_best_gain = false;
+};
+
+std::optional<int> parsePlainIntLine(const std::string& line,
+                                     const std::string& label) {
+    if (!startsWith(line, label))
+        return std::nullopt;
+
+    try {
+        return std::stoi(trim(line.substr(label.size())));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<int> parseSignedCpLine(const std::string& line,
+                                     const std::string& label) {
+    if (!startsWith(line, label))
+        return std::nullopt;
+
+    std::string value = trim(line.substr(label.size()));
+    if (value.ends_with("cp"))
+        value.resize(value.size() - 2);
+
+    try {
+        return std::stoi(value);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<BatchComparisonLogSummary> parseComparisonSummary(
+    const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file.is_open())
+        return std::nullopt;
+
+    BatchComparisonLogSummary summary;
+    bool saw_positions = false;
+    bool saw_candidate = false;
+    bool saw_reference = false;
+    bool saw_equal = false;
+    bool saw_diff = false;
+    std::string line;
+    while (std::getline(file, line)) {
+        line = trim(line);
+        if (auto value = parsePlainIntLine(line, "positions:")) {
+            summary.positions = *value;
+            saw_positions = true;
+        } else if (auto value = parsePlainIntLine(line, "candidate better:")) {
+            summary.candidate_better = *value;
+            saw_candidate = true;
+        } else if (auto value = parsePlainIntLine(line, "reference better:")) {
+            summary.reference_better = *value;
+            saw_reference = true;
+        } else if (auto value = parsePlainIntLine(line, "equal:")) {
+            summary.equal = *value;
+            saw_equal = true;
+        } else if (auto value = parseSignedCpLine(line, "diff:")) {
+            summary.diff = *value;
+            saw_diff = true;
+        } else if (auto value = parseSignedCpLine(line, "worst regression:")) {
+            summary.worst_regression = *value;
+        } else if (auto value = parseSignedCpLine(line, "best gain:")) {
+            summary.best_gain = *value;
+        }
+    }
+
+    if (!saw_positions || !saw_candidate || !saw_reference || !saw_equal || !saw_diff)
+        return std::nullopt;
+    return summary;
+}
+
+void appendBatchComparisonSummary(BatchComparisonSummary& batch,
+                                  const BatchComparisonLogSummary& log) {
+    batch.logs++;
+    if (log.diff > 0)
+        batch.candidate_logs++;
+    else if (log.diff < 0)
+        batch.reference_logs++;
+    else
+        batch.equal_logs++;
+
+    batch.positions += log.positions;
+    batch.candidate_better += log.candidate_better;
+    batch.reference_better += log.reference_better;
+    batch.equal += log.equal;
+    batch.diff += log.diff;
+
+    if (!batch.has_worst_regression || log.worst_regression < batch.worst_regression) {
+        batch.worst_regression = log.worst_regression;
+        batch.has_worst_regression = true;
+    }
+    if (!batch.has_best_gain || log.best_gain > batch.best_gain) {
+        batch.best_gain = log.best_gain;
+        batch.has_best_gain = true;
+    }
+}
+
+std::string formatBatchComparisonSummary(const BatchComparisonSummary& summary) {
+    if (summary.logs == 0)
+        return "";
+
+    int avg_log = static_cast<int>(std::lround(static_cast<double>(summary.diff)
+                                             / summary.logs));
+    int avg_pos = summary.positions == 0
+        ? 0
+        : static_cast<int>(std::lround(static_cast<double>(summary.diff)
+                                     / static_cast<double>(summary.positions)));
+
+    return fmt::format("\nBatch comparison:\n"
+                       "logs:              {}\n"
+                       "positions:         {}\n"
+                       "candidate better:  {} logs, {} moves\n"
+                       "reference better:  {} logs, {} moves\n"
+                       "equal:             {} logs, {} moves\n"
+                       "total diff:        {}\n"
+                       "avg diff/log:      {}\n"
+                       "avg diff/pos:      {}\n"
+                       "worst regression:  {}\n"
+                       "best gain:         {}\n",
+                       summary.logs,
+                       summary.positions,
+                       summary.candidate_logs, summary.candidate_better,
+                       summary.reference_logs, summary.reference_better,
+                       summary.equal_logs, summary.equal,
+                       formatSignedCp(summary.diff),
+                       formatSignedCp(avg_log),
+                       formatSignedCp(avg_pos),
+                       formatSignedCp(summary.worst_regression),
+                       formatSignedCp(summary.best_gain));
+}
+
 int waitForBatchJob(const RunningJob& job,
                     const std::vector<std::filesystem::path>& logs,
                     size_t completed,
@@ -2343,7 +2516,8 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             char* argv[],
             const std::vector<int>& logfile_arg_indices,
             int jobs,
-            bool csv_output) {
+            bool csv_output,
+            bool aggregate_comparison) {
     if (logs.empty()) {
         fmt::print(stderr, "ERROR: No .log files found\n");
         return 1;
@@ -2353,6 +2527,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
 
     int failures = 0;
     bool wrote_csv_header = false;
+    BatchComparisonSummary comparison_summary;
     setenv(kReplayBatch, "1", 1);
     if (jobs <= 1) {
         for (size_t i = 0; i < logs.size(); ++i) {
@@ -2371,6 +2546,10 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
                                       std::chrono::steady_clock::now()},
                                      logs, i, csv_output);
             printJobOutput(output_path, csv_output);
+            if (aggregate_comparison) {
+                if (auto summary = parseComparisonSummary(output_path))
+                    appendBatchComparisonSummary(comparison_summary, *summary);
+            }
             appendCsvOutput(csv_output_path, wrote_csv_header, std::cout);
             std::filesystem::remove(output_path);
             if (!csv_output_path.empty())
@@ -2380,6 +2559,9 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             if (rc != 0)
                 failures++;
         }
+        if (aggregate_comparison)
+            fmt::print(csv_output ? stderr : stdout, "{}",
+                       formatBatchComparisonSummary(comparison_summary));
         return failures == 0 ? 0 : 1;
     }
 
@@ -2417,6 +2599,10 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
                    "\n[{}/{}] {}\n",
                    job.index + 1, logs.size(), logs[job.index].filename().string());
         printJobOutput(job.output_path, csv_output);
+        if (aggregate_comparison) {
+            if (auto summary = parseComparisonSummary(job.output_path))
+                appendBatchComparisonSummary(comparison_summary, *summary);
+        }
         appendCsvOutput(job.csv_output_path, wrote_csv_header, std::cout);
         std::filesystem::remove(job.output_path);
         if (!job.csv_output_path.empty())
@@ -2479,6 +2665,10 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
         }
         throw;
     }
+
+    if (aggregate_comparison)
+        fmt::print(csv_output ? stderr : stdout, "{}",
+                   formatBatchComparisonSummary(comparison_summary));
 
     return failures == 0 ? 0 : 1;
 }
@@ -2711,9 +2901,15 @@ int main(int argc, char* argv[]) {
             setenv(kSuppressLogTimeWarning, "1", 1);
     }
 
+    bool compare_reference_requested = reference_path_explicit
+                                    && analyze
+                                    && analysis_target != "log"
+                                    && !csv_output;
+
     if (run_as_batch)
         return runLogs(collectLogTargets(logfile_targets), argc, argv,
-                       logfile_arg_indices, jobs, csv_output);
+                       logfile_arg_indices, jobs, csv_output,
+                       compare_reference_requested);
 
     if (std::filesystem::path(logfile).extension() != ".log") {
         fmt::print(stderr, "ERROR: replay needs a .log file.\n");

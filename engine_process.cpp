@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -83,7 +84,13 @@ struct EngineProcess::Impl {
 };
 
 EngineProcess::EngineProcess(const std::string& engine_path, bool verbose_output)
+    : EngineProcess(std::vector<std::string>{engine_path}, verbose_output) {}
+
+EngineProcess::EngineProcess(const std::vector<std::string>& command, bool verbose_output)
     : impl(std::make_unique<Impl>()) {
+    if (command.empty() || command.front().empty())
+        throw std::runtime_error("empty engine command");
+
     impl->verbose = verbose_output;
     signal(SIGPIPE, SIG_IGN);
 
@@ -114,7 +121,13 @@ EngineProcess::EngineProcess(const std::string& engine_path, bool verbose_output
         close(pipe_from_engine[0]);
         close(pipe_from_engine[1]);
 
-        execlp(engine_path.c_str(), engine_path.c_str(), nullptr);
+        std::vector<char*> argv;
+        argv.reserve(command.size() + 1);
+        for (const auto& argument : command)
+            argv.push_back(const_cast<char*>(argument.c_str()));
+        argv.push_back(nullptr);
+
+        execvp(argv.front(), argv.data());
         exit(1);
     }
 

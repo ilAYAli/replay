@@ -1321,12 +1321,111 @@ bool reportTriggersFailure(const std::string& report) {
     return false;
 }
 
-bool executableExists(const std::string& path) {
-    if (path.find('/') != std::string::npos)
-        return access(path.c_str(), X_OK) == 0;
+std::string expandTilde(std::string text) {
+    const char* home = std::getenv("HOME");
+    if (!home || !*home)
+        return text;
 
-    std::string check_cmd = fmt::format("which {} >/dev/null 2>&1", path);
-    return system(check_cmd.c_str()) == 0;
+    if (text == "~" || startsWith(text, "~/")) {
+        text.replace(0, 1, home);
+        return text;
+    }
+
+    size_t pos = text.find("=~/");
+    if (pos != std::string::npos)
+        text.replace(pos + 1, 1, home);
+    return text;
+}
+
+std::vector<std::string> parseEngineOptions(std::string_view text) {
+    std::vector<std::string> args;
+    std::string current;
+    char quote = '\0';
+    bool escaping = false;
+    bool token_started = false;
+
+    auto finish_token = [&]() {
+        if (!token_started)
+            return;
+        args.push_back(expandTilde(current));
+        current.clear();
+        token_started = false;
+    };
+
+    for (char ch : text) {
+        if (escaping) {
+            current += ch;
+            escaping = false;
+            token_started = true;
+            continue;
+        }
+
+        if (ch == '\\') {
+            escaping = true;
+            token_started = true;
+            continue;
+        }
+
+        if (quote != '\0') {
+            if (ch == quote)
+                quote = '\0';
+            else
+                current += ch;
+            token_started = true;
+            continue;
+        }
+
+        if (ch == '\'' || ch == '"') {
+            quote = ch;
+            token_started = true;
+            continue;
+        }
+
+        if (std::isspace((unsigned char)ch)) {
+            finish_token();
+            continue;
+        }
+
+        current += ch;
+        token_started = true;
+    }
+
+    if (escaping)
+        throw std::runtime_error("trailing escape");
+    if (quote != '\0')
+        throw std::runtime_error("unterminated quote");
+
+    finish_token();
+    return args;
+}
+
+std::vector<std::string> engineCommand(const std::string& path,
+                                       const std::vector<std::string>& options) {
+    std::vector<std::string> command{expandTilde(path)};
+    command.insert(command.end(), options.begin(), options.end());
+    return command;
+}
+
+bool executableExists(const std::string& path) {
+    std::string expanded = expandTilde(path);
+    if (expanded.find('/') != std::string::npos)
+        return access(expanded.c_str(), X_OK) == 0;
+
+    const char* path_env = std::getenv("PATH");
+    if (!path_env)
+        return false;
+
+    std::stringstream paths(path_env);
+    std::string directory;
+    while (std::getline(paths, directory, ':')) {
+        std::filesystem::path candidate = directory.empty()
+            ? std::filesystem::path(".") / expanded
+            : std::filesystem::path(directory) / expanded;
+        if (access(candidate.c_str(), X_OK) == 0)
+            return true;
+    }
+
+    return false;
 }
 
 std::string shellQuote(const std::string& value) {
@@ -2698,6 +2797,9 @@ int main(int argc, char* argv[]) {
     bool print_move_output = false;
     bool candidate_path_explicit = false;
     bool reference_path_explicit = false;
+    std::vector<std::string> candidate_opts;
+    std::vector<std::string> reference_opts;
+    std::vector<std::string> oracle_opts;
     std::vector<std::pair<int, std::string>> positional_args;
 
     auto print_help = [&](const char* prog) {
@@ -2712,8 +2814,14 @@ int main(int argc, char* argv[]) {
             "\n"
             "Options:\n"
             "  --candidate <path>  Candidate engine to replay with (default: enyo)\n"
+            "  --candidate-opts <args>\n"
+            "                      Extra process args for the candidate engine\n"
             "  --reference <path>  Baseline engine to compare against\n"
+            "  --reference-opts <args>\n"
+            "                      Extra process args for the reference engine\n"
             "  --oracle <path>     Oracle engine for judging moves (default: stockfish)\n"
+            "  --oracle-opts <args>\n"
+            "                      Extra process args for the oracle engine\n"
             "  --oracle-nodes N    Oracle analysis nodes (default: 200000)\n"
             "  --oracle-depth N    Oracle analysis depth instead of nodes; 0 follows logged depth\n"
             "  --log               Analyze logged moves instead of replayed moves;\n"
@@ -2738,6 +2846,19 @@ int main(int argc, char* argv[]) {
             prog);
     };
 
+    auto append_engine_opts = [&](std::vector<std::string>& target,
+                                  std::string_view value,
+                                  const char* option) {
+        try {
+            std::vector<std::string> parsed = parseEngineOptions(value);
+            target.insert(target.end(), parsed.begin(), parsed.end());
+            return true;
+        } catch (const std::exception& ex) {
+            fmt::print(stderr, "ERROR: Invalid {}: {}\n", option, ex.what());
+            return false;
+        }
+    };
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
@@ -2746,11 +2867,32 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--candidate" && i + 1 < argc) {
             candidate_path = argv[++i];
             candidate_path_explicit = true;
+        } else if (arg == "--candidate-opts" && i + 1 < argc) {
+            if (!append_engine_opts(candidate_opts, argv[++i], "--candidate-opts"))
+                return 1;
+        } else if (startsWith(arg, "--candidate-opts=")) {
+            if (!append_engine_opts(candidate_opts, arg.substr(std::string("--candidate-opts=").size()),
+                                    "--candidate-opts"))
+                return 1;
         } else if (arg == "--reference" && i + 1 < argc) {
             reference_path = argv[++i];
             reference_path_explicit = true;
+        } else if (arg == "--reference-opts" && i + 1 < argc) {
+            if (!append_engine_opts(reference_opts, argv[++i], "--reference-opts"))
+                return 1;
+        } else if (startsWith(arg, "--reference-opts=")) {
+            if (!append_engine_opts(reference_opts, arg.substr(std::string("--reference-opts=").size()),
+                                    "--reference-opts"))
+                return 1;
         } else if (arg == "--oracle" && i + 1 < argc) {
             oracle_path = argv[++i];
+        } else if (arg == "--oracle-opts" && i + 1 < argc) {
+            if (!append_engine_opts(oracle_opts, argv[++i], "--oracle-opts"))
+                return 1;
+        } else if (startsWith(arg, "--oracle-opts=")) {
+            if (!append_engine_opts(oracle_opts, arg.substr(std::string("--oracle-opts=").size()),
+                                    "--oracle-opts"))
+                return 1;
         } else if (arg == "--oracle-nodes" && i + 1 < argc) {
             oracle_limit = {ReferenceLimitKind::Nodes, std::max(1, std::stoi(argv[++i]))};
         } else if (arg == "--oracle-depth" && i + 1 < argc) {
@@ -2983,7 +3125,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
-            oracle = std::make_unique<EngineProcess>(oracle_path, verbose);
+            oracle = std::make_unique<EngineProcess>(engineCommand(oracle_path, oracle_opts), verbose);
             initializeReference(*oracle);
         }
 
@@ -3032,8 +3174,8 @@ int main(int argc, char* argv[]) {
             return reportTriggersFailure(analysis_report_body) ? 1 : 0;
         }
 
-        auto make_engine = [&](const std::string& path) {
-            auto engine = std::make_unique<EngineProcess>(path, verbose);
+        auto make_engine = [&](const std::string& path, const std::vector<std::string>& options) {
+            auto engine = std::make_unique<EngineProcess>(engineCommand(path, options), verbose);
             initializeEngine(*engine, parsed.setoptions, threads);
             return engine;
         };
@@ -3061,7 +3203,7 @@ int main(int argc, char* argv[]) {
 
         for (const auto& entry : entries) {
             if (compare_reference || !candidate)
-                candidate = make_engine(candidate_path);
+                candidate = make_engine(candidate_path, candidate_opts);
 
             std::string go_command = time_mode ? entry.logged_go : entry.replay_go;
             candidate->send(entry.position);
@@ -3081,7 +3223,7 @@ int main(int argc, char* argv[]) {
             SearchResult reference_result;
             bool reference_mismatch = false;
             if (compare_reference) {
-                reference_engine = make_engine(reference_path);
+                reference_engine = make_engine(reference_path, reference_opts);
                 reference_engine->send(entry.position);
                 reference_engine->send(go_command);
                 reference_result = waitForBestmove(*reference_engine, entry,

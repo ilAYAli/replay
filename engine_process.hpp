@@ -11,6 +11,7 @@ class EngineProcess {
 
 public:
     EngineProcess(const std::string& engine_path, bool verbose_output);
+    EngineProcess(const std::vector<std::string>& command, bool verbose_output);
     ~EngineProcess();
 
     EngineProcess(const EngineProcess&) = delete;

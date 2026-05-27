@@ -24,7 +24,10 @@ defaults:
 
 ```text
 --candidate enyo
+--candidate-opts ""
+--reference-opts ""
 --oracle stockfish
+--oracle-opts ""
 --oracle-nodes 200000
 --fixed-nodes 100000
 --fixed-movetime 1000
@@ -39,8 +42,11 @@ better move according to the oracle.
 ## Arguments
 
 - `--candidate <path>`: engine being tested. Defaults to `enyo`.
+- `--candidate-opts <args>`: extra process arguments for the candidate engine.
 - `--reference <path>`: baseline engine for candidate-vs-reference comparison.
+- `--reference-opts <args>`: extra process arguments for the reference engine.
 - `--oracle <path>`: judge engine. Defaults to `stockfish`.
+- `--oracle-opts <args>`: extra process arguments for the oracle engine.
 - `--oracle-nodes N`: oracle node budget. Defaults to `200000`; raise this
   for deeper validation.
 - `--oracle-depth N`: oracle depth budget instead of `--oracle-nodes`; `0`
@@ -74,10 +80,19 @@ replay game.log
 This replays the default candidate engine on every logged position using
 `--fixed-nodes 100000`, then asks the oracle to judge the candidate moves.
 
+To pass process arguments to an engine, quote them as one option string:
+
+```sh
+replay --candidate ./new-enyo --candidate-opts "--config ~/.config/enyo/new.json" game.log
+```
+
 ## Compare With A Reference
 
 ```sh
-replay --candidate ./new-enyo --reference ./old-enyo game.log
+replay --candidate ./new-enyo --reference ./old-enyo \
+       --candidate-opts "--config ~/.config/enyo/new.json" \
+       --reference-opts "--config ~/.config/enyo/old.json" \
+       game.log
 ```
 
 This runs both engines on the same logged positions with the same replay

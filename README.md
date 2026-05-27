@@ -38,11 +38,14 @@ defaults:
 Without `--reference`, replay reports candidate quality against the oracle.
 With `--reference`, replay reports whether the candidate or reference made the
 better move according to the oracle.
+Replay prints the candidate and reference commands before analysis. With
+`--csv`, that command summary is written to stderr.
 
 ## Arguments
 
 - `--candidate <path>`: engine being tested. Defaults to `enyo`.
 - `--candidate-opts <args>`: extra process arguments for the candidate engine.
+  If no engine path is supplied, this enables same-engine config comparison.
 - `--reference <path>`: baseline engine for candidate-vs-reference comparison.
 - `--reference-opts <args>`: extra process arguments for the reference engine.
   If `--reference` is omitted, the reference uses the candidate engine path.
@@ -99,11 +102,11 @@ replay --candidate ./new-enyo --reference ./old-enyo \
 This runs both engines on the same logged positions with the same replay
 budget. The oracle evaluates both moves. Positive `diff` means the candidate
 was better than the reference; negative `diff` means the candidate was worse.
-When comparing two configs of the same engine, `--reference` can be omitted:
+When comparing two configs of the same default engine, both engine paths can be
+omitted:
 
 ```sh
-replay --candidate ./enyo \
-       --candidate-opts "--config ~/.config/enyo/default.json" \
+replay --candidate-opts "--config ~/.config/enyo/default.json" \
        --reference-opts "--config ~/.config/enyo/current.json" \
        game.log
 ```

@@ -1406,6 +1406,22 @@ std::vector<std::string> engineCommand(const std::string& path,
     return command;
 }
 
+std::string shellQuote(const std::string& value);
+
+std::string formatCommandDisplay(const std::string& path,
+                                 const std::vector<std::string>& options) {
+    std::vector<std::string> command = engineCommand(path, options);
+    std::string output;
+    for (const auto& argument : command) {
+        if (!output.empty())
+            output += " ";
+        bool needs_quote = argument.empty()
+                         || argument.find_first_of(" \t\n'\"\\") != std::string::npos;
+        output += needs_quote ? shellQuote(argument) : argument;
+    }
+    return output;
+}
+
 bool executableExists(const std::string& path) {
     std::string expanded = expandTilde(path);
     if (expanded.find('/') != std::string::npos)
@@ -2796,6 +2812,7 @@ int main(int argc, char* argv[]) {
     bool color_output = false;
     bool print_move_output = false;
     bool candidate_path_explicit = false;
+    bool candidate_opts_explicit = false;
     bool reference_path_explicit = false;
     bool reference_opts_explicit = false;
     std::vector<std::string> candidate_opts;
@@ -2816,7 +2833,8 @@ int main(int argc, char* argv[]) {
             "Options:\n"
             "  --candidate <path>  Candidate engine to replay with (default: enyo)\n"
             "  --candidate-opts <args>\n"
-            "                      Extra process args for the candidate engine\n"
+            "                      Extra process args for the candidate engine;\n"
+            "                      implies same-engine comparison when no engine path is supplied\n"
             "  --reference <path>  Baseline engine to compare against\n"
             "  --reference-opts <args>\n"
             "                      Extra process args for the reference engine;\n"
@@ -2870,9 +2888,11 @@ int main(int argc, char* argv[]) {
             candidate_path = argv[++i];
             candidate_path_explicit = true;
         } else if (arg == "--candidate-opts" && i + 1 < argc) {
+            candidate_opts_explicit = true;
             if (!append_engine_opts(candidate_opts, argv[++i], "--candidate-opts"))
                 return 1;
         } else if (startsWith(arg, "--candidate-opts=")) {
+            candidate_opts_explicit = true;
             if (!append_engine_opts(candidate_opts, arg.substr(std::string("--candidate-opts=").size()),
                                     "--candidate-opts"))
                 return 1;
@@ -2974,13 +2994,18 @@ int main(int argc, char* argv[]) {
             && !candidate_path_explicit
             && isPositionalEngine(positional_args[0].second, positional_args[1].second)) {
         candidate_path = positional_args[0].second;
+        candidate_path_explicit = true;
         logfile_arg_index = positional_args[1].first;
         logfile = positional_args[1].second;
     } else if (batch_uses_positional_engine) {
         candidate_path = positional_args[0].second;
+        candidate_path_explicit = true;
     }
 
-    if (reference_opts_explicit && !reference_path_explicit) {
+    bool engine_opts_without_engine_path = !candidate_path_explicit
+                                        && !reference_path_explicit
+                                        && (candidate_opts_explicit || reference_opts_explicit);
+    if ((reference_opts_explicit || engine_opts_without_engine_path) && !reference_path_explicit) {
         reference_path = candidate_path;
         reference_path_explicit = true;
     }
@@ -3209,6 +3234,14 @@ int main(int argc, char* argv[]) {
             csv_stream = &csv_buffer;
             writeCsvHeader(*csv_stream);
         }
+
+        std::string engine_summary = fmt::format("candidate: {}\nreference: {}\n",
+            formatCommandDisplay(candidate_path, candidate_opts),
+            compare_reference ? formatCommandDisplay(reference_path, reference_opts) : "none");
+        if (csv_output)
+            fmt::print(stderr, "{}", batchIndent(engine_summary));
+        else
+            printBatchBlock(engine_summary);
 
         for (const auto& entry : entries) {
             if (compare_reference || !candidate)

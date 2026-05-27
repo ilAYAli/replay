@@ -38,8 +38,8 @@ defaults:
 Without `--reference`, replay reports candidate quality against the oracle.
 With `--reference`, replay reports whether the candidate or reference made the
 better move according to the oracle.
-Replay prints the candidate and reference commands before analysis. With
-`--csv`, that command summary is written to stderr.
+Replay prints the candidate and reference UCI IDs before analysis. With
+`--csv`, that summary is written to stderr.
 
 ## Arguments
 

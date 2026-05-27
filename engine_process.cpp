@@ -60,6 +60,8 @@ struct EngineProcess::Impl {
     bool verbose = false;
     bool status_known = false;
     int status = 0;
+    std::string uci_name;
+    std::string uci_author;
 
     bool collectExitStatus(int options) {
         if (status_known)
@@ -192,7 +194,21 @@ std::optional<std::string> EngineProcess::readLine(bool print_diagnostics) {
         fmt::print(stderr, "{}\n", line);
     else if (print_diagnostics && isDiagnosticLine(line))
         fmt::print(stderr, "{}\n", stripDiagnosticFen(line));
+    if (startsWith(line, "id name "))
+        impl->uci_name = line.substr(8);
+    else if (startsWith(line, "id author "))
+        impl->uci_author = line.substr(10);
     return line;
+}
+
+std::string EngineProcess::uciId() const {
+    if (!impl)
+        return "";
+    if (!impl->uci_name.empty())
+        return impl->uci_name;
+    if (!impl->uci_author.empty())
+        return impl->uci_author;
+    return "";
 }
 
 bool EngineProcess::hasExited() {

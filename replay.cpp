@@ -1406,22 +1406,6 @@ std::vector<std::string> engineCommand(const std::string& path,
     return command;
 }
 
-std::string shellQuote(const std::string& value);
-
-std::string formatCommandDisplay(const std::string& path,
-                                 const std::vector<std::string>& options) {
-    std::vector<std::string> command = engineCommand(path, options);
-    std::string output;
-    for (const auto& argument : command) {
-        if (!output.empty())
-            output += " ";
-        bool needs_quote = argument.empty()
-                         || argument.find_first_of(" \t\n'\"\\") != std::string::npos;
-        output += needs_quote ? shellQuote(argument) : argument;
-    }
-    return output;
-}
-
 bool executableExists(const std::string& path) {
     std::string expanded = expandTilde(path);
     if (expanded.find('/') != std::string::npos)
@@ -3235,9 +3219,22 @@ int main(int argc, char* argv[]) {
             writeCsvHeader(*csv_stream);
         }
 
+        auto id_or_unknown = [](const EngineProcess& engine) {
+            std::string id = engine.uciId();
+            return id.empty() ? std::string("unknown") : id;
+        };
+        candidate = make_engine(candidate_path, candidate_opts);
+        std::string candidate_id = id_or_unknown(*candidate);
+        std::string reference_id = "none";
+        if (compare_reference) {
+            reference_engine = make_engine(reference_path, reference_opts);
+            reference_id = id_or_unknown(*reference_engine);
+            candidate.reset();
+            reference_engine.reset();
+        }
+
         std::string engine_summary = fmt::format("candidate: {}\nreference: {}\n",
-            formatCommandDisplay(candidate_path, candidate_opts),
-            compare_reference ? formatCommandDisplay(reference_path, reference_opts) : "none");
+            candidate_id, reference_id);
         if (csv_output)
             fmt::print(stderr, "{}", batchIndent(engine_summary));
         else

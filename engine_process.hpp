@@ -22,6 +22,7 @@ public:
     void send(const std::string& cmd);
     bool waitReadable(int timeout_ms);
     std::optional<std::string> readLine(bool print_diagnostics = true);
+    std::string uciId() const;
     bool hasExited();
     std::optional<std::string> abnormalTermination();
     std::string terminationMessage(const std::string& context);

@@ -45,6 +45,7 @@ better move according to the oracle.
 - `--candidate-opts <args>`: extra process arguments for the candidate engine.
 - `--reference <path>`: baseline engine for candidate-vs-reference comparison.
 - `--reference-opts <args>`: extra process arguments for the reference engine.
+  If `--reference` is omitted, the reference uses the candidate engine path.
 - `--oracle <path>`: judge engine. Defaults to `stockfish`.
 - `--oracle-opts <args>`: extra process arguments for the oracle engine.
 - `--oracle-nodes N`: oracle node budget. Defaults to `200000`; raise this
@@ -98,3 +99,11 @@ replay --candidate ./new-enyo --reference ./old-enyo \
 This runs both engines on the same logged positions with the same replay
 budget. The oracle evaluates both moves. Positive `diff` means the candidate
 was better than the reference; negative `diff` means the candidate was worse.
+When comparing two configs of the same engine, `--reference` can be omitted:
+
+```sh
+replay --candidate ./enyo \
+       --candidate-opts "--config ~/.config/enyo/default.json" \
+       --reference-opts "--config ~/.config/enyo/current.json" \
+       game.log
+```

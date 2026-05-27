@@ -2797,6 +2797,7 @@ int main(int argc, char* argv[]) {
     bool print_move_output = false;
     bool candidate_path_explicit = false;
     bool reference_path_explicit = false;
+    bool reference_opts_explicit = false;
     std::vector<std::string> candidate_opts;
     std::vector<std::string> reference_opts;
     std::vector<std::string> oracle_opts;
@@ -2818,7 +2819,8 @@ int main(int argc, char* argv[]) {
             "                      Extra process args for the candidate engine\n"
             "  --reference <path>  Baseline engine to compare against\n"
             "  --reference-opts <args>\n"
-            "                      Extra process args for the reference engine\n"
+            "                      Extra process args for the reference engine;\n"
+            "                      implies --reference <candidate> when --reference is omitted\n"
             "  --oracle <path>     Oracle engine for judging moves (default: stockfish)\n"
             "  --oracle-opts <args>\n"
             "                      Extra process args for the oracle engine\n"
@@ -2878,9 +2880,11 @@ int main(int argc, char* argv[]) {
             reference_path = argv[++i];
             reference_path_explicit = true;
         } else if (arg == "--reference-opts" && i + 1 < argc) {
+            reference_opts_explicit = true;
             if (!append_engine_opts(reference_opts, argv[++i], "--reference-opts"))
                 return 1;
         } else if (startsWith(arg, "--reference-opts=")) {
+            reference_opts_explicit = true;
             if (!append_engine_opts(reference_opts, arg.substr(std::string("--reference-opts=").size()),
                                     "--reference-opts"))
                 return 1;
@@ -2974,6 +2978,11 @@ int main(int argc, char* argv[]) {
         logfile = positional_args[1].second;
     } else if (batch_uses_positional_engine) {
         candidate_path = positional_args[0].second;
+    }
+
+    if (reference_opts_explicit && !reference_path_explicit) {
+        reference_path = candidate_path;
+        reference_path_explicit = true;
     }
 
     bool batch_input = positional_args.size() > 1 && logfile.empty();

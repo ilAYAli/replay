@@ -16,7 +16,8 @@ Generate NNUE target JSONL:
 find ~/code/cpp/chess/lichess/logs/loss -name '*.log' | sort |
 replay --jsonl \
   --candidate ../assets/engines/reference \
-  --oracle-nodes 200000 \
+  --top-root-moves 4 \
+  --max-moves-per-position 16 \
   --jobs 8 \
   --move 8 \
   - \

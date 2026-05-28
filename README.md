@@ -43,7 +43,7 @@ replay \
   --candidate ./build/enyo \
   --reference ../assets/engines/enyo_before_fix \
   --jobs 8 \
-  ~/code/cpp/chess/enyo/bugs
+  ~/code/cpp/chess/lichess/logs/loss
 ```
 
 Compare two nets with the same engine:

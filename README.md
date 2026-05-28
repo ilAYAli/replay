@@ -36,6 +36,16 @@ Compare two engines/configs:
 replay --candidate ./new-enyo --reference ./old-enyo game.log
 ```
 
+Validate a fixed candidate against a previous engine over a bug set:
+
+```sh
+replay \
+  --candidate ./build/enyo \
+  --reference ../assets/engines/enyo_before_fix \
+  --jobs 8 \
+  ~/code/cpp/chess/enyo/bugs
+```
+
 Compare two nets with the same engine:
 
 ```sh

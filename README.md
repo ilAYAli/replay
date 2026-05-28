@@ -1,4 +1,4 @@
-# Replay
+# replay
 
 `replay` reads UCI `.log` files and reuses the logged parent positions as a
 test set. It does not play a new game forward.
@@ -9,6 +9,28 @@ moves. `--log` skips the candidate and analyzes the logged moves. `--reference`
 is only for A/B comparison against a different engine or config.
 
 ## Common Commands
+
+Analyze logged moves:
+
+```sh
+replay --log game.log
+```
+
+Compare two engines:
+
+```sh
+replay --candidate ./new-enyo --reference ./old-enyo game.log
+```
+
+Compare two configurations of the same engine:
+
+```sh
+replay --candidate ./build/enyo \
+  --reference ./build/enyo \
+  --reference-opts "--config ~/.config/enyo/net-b.json" \
+  --candidate-opts "--config ~/.config/enyo/net-a.json" \
+  game.log
+```
 
 Generate NNUE target JSONL:
 
@@ -23,38 +45,6 @@ replay --jsonl \
   - \
   > targets/loss_replay.jsonl \
   2> targets/loss_replay.stderr
-```
-
-Analyze the moves actually played in a log:
-
-```sh
-replay --log game.log
-```
-
-Compare two engines/configs:
-
-```sh
-replay --candidate ./new-enyo --reference ./old-enyo game.log
-```
-
-Validate a fixed candidate against a previous engine over a bug set:
-
-```sh
-replay \
-  --candidate ./build/enyo \
-  --reference ../assets/engines/enyo_before_fix \
-  --jobs 8 \
-  ~/code/cpp/chess/lichess/logs/loss
-```
-
-Compare two nets with the same engine:
-
-```sh
-replay --candidate ./build/enyo \
-  --candidate-opts "--config ~/.config/enyo/net-a.json" \
-  --reference ./build/enyo \
-  --reference-opts "--config ~/.config/enyo/net-b.json" \
-  game.log
 ```
 
 ## JSONL

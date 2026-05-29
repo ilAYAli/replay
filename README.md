@@ -25,36 +25,36 @@ replay --candidate ./build/enyo game.log
 Replay the current build with an alternate UCI option:
 
 ```sh
-replay --candidate-uci "nnue_file=foo.nn" \
-  --candidate ./build/enyo \
+replay --candidate ./build/enyo \
+  --candidate-uci "nnue_file=foo.nn" \
   game.log
 ```
 
 Compare against a stable reference when you need A/B output:
 
 ```sh
-replay --reference ~/assets/engines/reference \
-  --candidate ./build/enyo \
+replay --candidate ./build/enyo \
+  --reference ~/assets/engines/reference \
   game.log
 ```
 
 Compare UCI options only when the engine configuration is part of the test:
 
 ```sh
-replay --reference ~/assets/engines/reference \
-  --reference-uci "nnue_file=net-b.nn" \
+replay --candidate ./build/enyo \
+  --reference ~/assets/engines/reference \
   --candidate-uci "nnue_file=net-a.nn" \
-  --candidate ./build/enyo \
+  --reference-uci "nnue_file=net-b.nn" \
   game.log
 ```
 
 Pass process args only when the engine executable needs them:
 
 ```sh
-replay --reference ~/assets/engines/reference \
-  --reference-opts "--config ~/.config/enyo/net-b.json" \
+replay --candidate ./build/enyo \
+  --reference ~/assets/engines/reference \
   --candidate-opts "--config ~/.config/enyo/net-a.json" \
-  --candidate ./build/enyo \
+  --reference-opts "--config ~/.config/enyo/net-b.json" \
   game.log
 ```
 
@@ -144,12 +144,13 @@ Move selection defaults are meant for training target extraction:
 
 ## Options
 
-- `--candidate`, `-c <path>`: engine being tested. Default: `enyo`.
-- `--candidate-opts <args>`: extra candidate process args; repeatable.
-- `--candidate-uci NAME=VAL`: extra candidate UCI option; repeatable.
-- `--reference`, `-r <path>`: baseline engine for A/B comparison. Default:
+- `--candidate`, `-c CANDIDATE`: candidate UCI engine executable. Default:
+  `enyo`.
+- `--reference`, `-r REFERENCE`: reference UCI engine executable. Default:
   `~/assets/engines/reference`.
-- `--reference-opts <args>`: extra reference process args; repeatable.
+- `--candidate-opts ARGS`: extra candidate process args; repeatable.
+- `--reference-opts ARGS`: extra reference process args; repeatable.
+- `--candidate-uci NAME=VAL`: extra candidate UCI option; repeatable.
 - `--reference-uci NAME=VAL`: extra reference UCI option; repeatable.
 - `--oracle <path>`: judge engine. Default: `stockfish`.
 - `--oracle-opts <args>`: extra oracle process args.

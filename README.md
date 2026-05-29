@@ -22,10 +22,10 @@ Replay the current build:
 replay --candidate ./build/enyo game.log
 ```
 
-Replay the current build with alternate process args:
+Replay the current build with an alternate UCI option:
 
 ```sh
-replay --candidate-opts "--config ~/.config/enyo/net-a.json" \
+replay --candidate-uci "nnue_file=foo.nn" \
   --candidate ./build/enyo \
   game.log
 ```
@@ -38,8 +38,17 @@ replay --reference ~/assets/engines/reference \
   game.log
 ```
 
-Compare reference-side process args only when the baseline config is part of
-the test:
+Compare UCI options only when the engine configuration is part of the test:
+
+```sh
+replay --reference ~/assets/engines/reference \
+  --reference-uci "nnue_file=net-b.nn" \
+  --candidate-uci "nnue_file=net-a.nn" \
+  --candidate ./build/enyo \
+  game.log
+```
+
+Pass process args only when the engine executable needs them:
 
 ```sh
 replay --reference ~/assets/engines/reference \
@@ -135,10 +144,13 @@ Move selection defaults are meant for training target extraction:
 
 ## Options
 
-- `--candidate <path>`: engine being tested. Default: `enyo`.
-- `--candidate-opts <args>`: extra candidate process args.
-- `--reference <path>`: baseline engine for A/B comparison.
-- `--reference-opts <args>`: extra reference process args.
+- `--candidate`, `-c <path>`: engine being tested. Default: `enyo`.
+- `--candidate-opts <args>`: extra candidate process args; repeatable.
+- `--candidate-uci NAME=VAL`: extra candidate UCI option; repeatable.
+- `--reference`, `-r <path>`: baseline engine for A/B comparison. Default:
+  `~/assets/engines/reference`.
+- `--reference-opts <args>`: extra reference process args; repeatable.
+- `--reference-uci NAME=VAL`: extra reference UCI option; repeatable.
 - `--oracle <path>`: judge engine. Default: `stockfish`.
 - `--oracle-opts <args>`: extra oracle process args.
 - `--oracle-nodes N`: oracle node budget. Default: `200000`.

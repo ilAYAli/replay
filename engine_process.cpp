@@ -250,7 +250,8 @@ void waitForToken(EngineProcess& engine, const std::string& token) {
 
 void initializeEngine(EngineProcess& engine,
                       const std::vector<std::string>& setoptions,
-                      int threads) {
+                      int threads,
+                      const std::vector<std::string>& extra_setoptions) {
     engine.send("uci");
     waitForToken(engine, "uciok");
 
@@ -259,6 +260,9 @@ void initializeEngine(EngineProcess& engine,
 
     if (threads > 0)
         engine.send(fmt::format("setoption name Threads value {}", threads));
+
+    for (const auto& option : extra_setoptions)
+        engine.send(option);
 
     engine.send("ucinewgame");
     engine.send("isready");

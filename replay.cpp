@@ -58,6 +58,7 @@ constexpr long long kDefaultMaxReplayNodes = 300'000;
 constexpr long long kDefaultFixedReplayNodes = 100'000;
 constexpr int kDefaultFixedReplayMovetimeMs = 1000;
 constexpr int kDefaultReplayReferenceNodes = 200'000;
+constexpr const char* kDefaultReferenceEngine = "~/assets/engines/reference";
 
 struct SearchResult {
     std::string bestmove;
@@ -224,9 +225,12 @@ struct JsonlContext {
     std::string oracle_id;
     std::vector<std::string> candidate_opts;
     std::vector<std::string> reference_opts;
+    std::vector<std::string> candidate_setoptions;
+    std::vector<std::string> reference_setoptions;
     std::vector<std::string> oracle_opts;
     std::vector<std::string> log_setoptions;
-    std::vector<std::string> effective_setoptions;
+    std::vector<std::string> candidate_effective_setoptions;
+    std::vector<std::string> reference_effective_setoptions;
     ReferenceLimit oracle_limit;
     JsonlMoveSelectionOptions move_selection;
     bool compare_reference = false;
@@ -1748,10 +1752,13 @@ std::string comparableEnginePath(const std::string& path) {
 
 bool sameEngineInvocation(const std::string& lhs_path,
                           const std::vector<std::string>& lhs_opts,
+                          const std::vector<std::string>& lhs_setoptions,
                           const std::string& rhs_path,
-                          const std::vector<std::string>& rhs_opts) {
+                          const std::vector<std::string>& rhs_opts,
+                          const std::vector<std::string>& rhs_setoptions) {
     return comparableEnginePath(lhs_path) == comparableEnginePath(rhs_path)
-        && lhs_opts == rhs_opts;
+        && lhs_opts == rhs_opts
+        && lhs_setoptions == rhs_setoptions;
 }
 
 bool executableExists(const std::string& path) {
@@ -1799,10 +1806,12 @@ std::filesystem::path tempJsonlPath(size_t index) {
 }
 
 std::vector<std::string> effectiveSetoptions(const std::vector<std::string>& log_setoptions,
-                                             int threads) {
+                                             int threads,
+                                             const std::vector<std::string>& extra_setoptions) {
     std::vector<std::string> setoptions = log_setoptions;
     if (threads > 0)
         setoptions.push_back(fmt::format("setoption name Threads value {}", threads));
+    setoptions.insert(setoptions.end(), extra_setoptions.begin(), extra_setoptions.end());
     return setoptions;
 }
 
@@ -2130,12 +2139,12 @@ json baseJsonlRecord(const JsonlContext& context,
         {"candidate", engineProvenanceJson(context.candidate_path,
                                            context.candidate_opts,
                                            context.candidate_id,
-                                           context.effective_setoptions)},
+                                           context.candidate_effective_setoptions)},
         {"reference", context.compare_reference
             ? engineProvenanceJson(context.reference_path,
                                    context.reference_opts,
                                    context.reference_id,
-                                   context.effective_setoptions)
+                                   context.reference_effective_setoptions)
             : engineProvenanceJson(context.oracle_path,
                                    context.oracle_opts,
                                    context.oracle_id)},
@@ -2143,7 +2152,11 @@ json baseJsonlRecord(const JsonlContext& context,
                                         context.oracle_opts,
                                         context.oracle_id)},
         {"log_setoptions", context.log_setoptions},
-        {"effective_setoptions", context.effective_setoptions},
+        {"effective_setoptions", context.candidate_effective_setoptions},
+        {"candidate_effective_setoptions", context.candidate_effective_setoptions},
+        {"reference_effective_setoptions", context.compare_reference
+            ? json(context.reference_effective_setoptions)
+            : json::array()},
         {"replay_go", replay_go},
         {"logged_go", entry.logged_go},
         {"logged_depth", entry.depth},
@@ -3566,7 +3579,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
 
 struct ReplayOptions {
     std::string candidate_path = "enyo";
-    std::string reference_path;
+    std::string reference_path = kDefaultReferenceEngine;
     std::string oracle_path = "stockfish";
     std::string logfile;
     int logfile_arg_index = -1;
@@ -3588,8 +3601,10 @@ struct ReplayOptions {
     bool print_move_output = false;
     bool candidate_path_explicit = false;
     bool candidate_opts_explicit = false;
+    bool candidate_uci_explicit = false;
     bool reference_path_explicit = false;
     bool reference_opts_explicit = false;
+    bool reference_uci_explicit = false;
     bool oracle_path_explicit = false;
     bool oracle_opts_explicit = false;
     bool oracle_limit_explicit = false;
@@ -3608,6 +3623,8 @@ struct ReplayOptions {
     std::string replay_budget_option;
     std::vector<std::string> candidate_opts;
     std::vector<std::string> reference_opts;
+    std::vector<std::string> candidate_setoptions;
+    std::vector<std::string> reference_setoptions;
     std::vector<std::string> oracle_opts;
     std::vector<std::pair<int, std::string>> positional_args;
     std::vector<std::string> logfile_targets;
@@ -3632,14 +3649,19 @@ void printHelp(const char* prog) {
         "At the end, judge moves with an oracle engine.\n"
         "\n"
         "Options:\n"
-        "  --candidate <path>  Candidate engine to replay with (default: enyo)\n"
+        "  --candidate, -c <path>\n"
+        "                      Candidate engine to replay with (default: enyo)\n"
         "  --candidate-opts <args>\n"
-        "                      Extra process args for the candidate engine;\n"
+        "                      Extra process args for the candidate engine; repeatable (default: none);\n"
         "                      implies same-engine comparison when no engine path is supplied\n"
-        "  --reference <path>  Baseline engine to compare against\n"
+        "  --candidate-uci NAME=VAL\n"
+        "                      Extra UCI option for the candidate engine; repeatable (default: none)\n"
+        "  --reference, -r <path>\n"
+        "                      Baseline engine to compare against (default: ~/assets/engines/reference)\n"
         "  --reference-opts <args>\n"
-        "                      Extra process args for the reference engine;\n"
-        "                      implies --reference <candidate> when --reference is omitted\n"
+        "                      Extra process args for the reference engine; repeatable (default: none)\n"
+        "  --reference-uci NAME=VAL\n"
+        "                      Extra UCI option for the reference engine; repeatable (default: none)\n"
         "  --oracle <path>     Oracle engine for judging moves (default: stockfish)\n"
         "  --oracle-opts <args>\n"
         "                      Extra process args for the oracle engine\n"
@@ -3693,6 +3715,27 @@ bool appendEngineOpts(std::vector<std::string>& target,
     }
 }
 
+bool appendUciSetoption(std::vector<std::string>& target,
+                        std::string_view value,
+                        const char* option) {
+    std::string text = expandTilde(std::string(value));
+    size_t equals = text.find('=');
+    if (equals == std::string::npos) {
+        fmt::print(stderr, "ERROR: Invalid {}: expected NAME=VAL\n", option);
+        return false;
+    }
+
+    std::string name = trim(text.substr(0, equals));
+    std::string option_value = trim(text.substr(equals + 1));
+    if (name.empty()) {
+        fmt::print(stderr, "ERROR: Invalid {}: empty UCI option name\n", option);
+        return false;
+    }
+
+    target.push_back(fmt::format("setoption name {} value {}", name, option_value));
+    return true;
+}
+
 bool setReplayBudget(ReplayOptions& options, const char* option) {
     if (!options.replay_budget_option.empty()) {
         fmt::print(stderr, "ERROR: {} conflicts with {}; choose one replay budget.\n",
@@ -3714,7 +3757,7 @@ ParseArgsResult parseArgs(int argc, char* argv[]) {
             printHelp(argv[0]);
             result.should_exit = true;
             return result;
-        } else if (arg == "--candidate" && i + 1 < argc) {
+        } else if ((arg == "--candidate" || arg == "-c") && i + 1 < argc) {
             options.candidate_path = argv[++i];
             options.candidate_path_explicit = true;
         } else if (arg == "--candidate-opts" && i + 1 < argc) {
@@ -3733,7 +3776,23 @@ ParseArgsResult parseArgs(int argc, char* argv[]) {
                 result.exit_code = 1;
                 return result;
             }
-        } else if (arg == "--reference" && i + 1 < argc) {
+        } else if (arg == "--candidate-uci" && i + 1 < argc) {
+            options.candidate_uci_explicit = true;
+            if (!appendUciSetoption(options.candidate_setoptions, argv[++i], "--candidate-uci")) {
+                result.ok = false;
+                result.exit_code = 1;
+                return result;
+            }
+        } else if (startsWith(arg, "--candidate-uci=")) {
+            options.candidate_uci_explicit = true;
+            if (!appendUciSetoption(options.candidate_setoptions,
+                                    arg.substr(std::string("--candidate-uci=").size()),
+                                    "--candidate-uci")) {
+                result.ok = false;
+                result.exit_code = 1;
+                return result;
+            }
+        } else if ((arg == "--reference" || arg == "-r") && i + 1 < argc) {
             options.reference_path = argv[++i];
             options.reference_path_explicit = true;
         } else if (arg == "--reference-opts" && i + 1 < argc) {
@@ -3748,6 +3807,22 @@ ParseArgsResult parseArgs(int argc, char* argv[]) {
             if (!appendEngineOpts(options.reference_opts,
                                   arg.substr(std::string("--reference-opts=").size()),
                                   "--reference-opts")) {
+                result.ok = false;
+                result.exit_code = 1;
+                return result;
+            }
+        } else if (arg == "--reference-uci" && i + 1 < argc) {
+            options.reference_uci_explicit = true;
+            if (!appendUciSetoption(options.reference_setoptions, argv[++i], "--reference-uci")) {
+                result.ok = false;
+                result.exit_code = 1;
+                return result;
+            }
+        } else if (startsWith(arg, "--reference-uci=")) {
+            options.reference_uci_explicit = true;
+            if (!appendUciSetoption(options.reference_setoptions,
+                                    arg.substr(std::string("--reference-uci=").size()),
+                                    "--reference-uci")) {
                 result.ok = false;
                 result.exit_code = 1;
                 return result;
@@ -3927,14 +4002,19 @@ bool resolvePositionalArgs(ReplayOptions& options) {
         options.candidate_path_explicit = true;
     }
 
-    bool engine_opts_without_engine_path = !options.candidate_path_explicit
-                                        && !options.reference_path_explicit
-                                        && (options.candidate_opts_explicit || options.reference_opts_explicit);
-    if ((options.reference_opts_explicit || engine_opts_without_engine_path)
-     && !options.reference_path_explicit) {
+    bool reference_config_explicit = options.reference_opts_explicit
+                                  || options.reference_uci_explicit;
+    bool candidate_config_without_engine_path = !options.candidate_path_explicit
+                                             && !options.reference_path_explicit
+                                             && options.analysis_target != "log"
+                                             && options.candidate_opts_explicit
+                                             && !reference_config_explicit;
+    if (candidate_config_without_engine_path) {
         options.reference_path = options.candidate_path;
         options.reference_path_explicit = true;
     }
+    if (reference_config_explicit)
+        options.reference_path_explicit = true;
 
     options.batch_input = options.positional_args.size() > 1 && options.logfile.empty();
     if (options.batch_input) {
@@ -3973,10 +4053,6 @@ bool validateArgs(ReplayOptions& options, const char* prog) {
         fmt::print(stderr, "ERROR: --log cannot be used with --no-analysis\n");
         return false;
     }
-    if (options.reference_path_explicit && options.analysis_target == "log") {
-        fmt::print(stderr, "ERROR: --reference compares replayed candidate output; it cannot be used with --log\n");
-        return false;
-    }
     if (options.reference_path_explicit && !options.analyze) {
         fmt::print(stderr, "ERROR: --reference needs oracle analysis; remove --no-analysis\n");
         return false;
@@ -4007,8 +4083,16 @@ bool validateArgs(ReplayOptions& options, const char* prog) {
     if (options.jobs_explicit && !options.run_as_batch)
         fmt::print(stderr, "WARNING: --jobs is ignored for a single log.\n");
     if (options.analysis_target == "log") {
-        if (options.candidate_path_explicit || options.candidate_opts_explicit) {
-            fmt::print(stderr, "ERROR: --log does not run the candidate engine; remove --candidate/--candidate-opts.\n");
+        if (options.candidate_path_explicit || options.candidate_opts_explicit || options.candidate_uci_explicit) {
+            fmt::print(stderr,
+                       "ERROR: --log does not run the candidate engine; "
+                       "remove --candidate/--candidate-opts/--candidate-uci.\n");
+            return false;
+        }
+        if (options.reference_path_explicit || options.reference_opts_explicit || options.reference_uci_explicit) {
+            fmt::print(stderr,
+                       "ERROR: --log does not run the reference engine; "
+                       "remove --reference/--reference-opts/--reference-uci.\n");
             return false;
         }
         if (options.threads_explicit)
@@ -4024,8 +4108,10 @@ bool validateArgs(ReplayOptions& options, const char* prog) {
     if (options.reference_path_explicit
      && sameEngineInvocation(options.candidate_path,
                              options.candidate_opts,
+                             options.candidate_setoptions,
                              options.reference_path,
-                             options.reference_opts)) {
+                             options.reference_opts,
+                             options.reference_setoptions)) {
         fmt::print(stderr,
                    "WARNING: --reference uses the same engine/options as --candidate; "
                    "this adds searches but no comparison signal.\n");
@@ -4073,6 +4159,8 @@ int runSingleLog(ReplayOptions& options) {
     bool reference_path_explicit = options.reference_path_explicit;
     std::vector<std::string>& candidate_opts = options.candidate_opts;
     std::vector<std::string>& reference_opts = options.reference_opts;
+    std::vector<std::string>& candidate_setoptions = options.candidate_setoptions;
+    std::vector<std::string>& reference_setoptions = options.reference_setoptions;
     std::vector<std::string>& oracle_opts = options.oracle_opts;
 
     if (std::filesystem::path(logfile).extension() != ".log") {
@@ -4198,9 +4286,11 @@ int runSingleLog(ReplayOptions& options) {
             return reportTriggersFailure(analysis_report_body) ? 1 : 0;
         }
 
-        auto make_engine = [&](const std::string& path, const std::vector<std::string>& options) {
-            auto engine = std::make_unique<EngineProcess>(engineCommand(path, options), verbose);
-            initializeEngine(*engine, parsed.setoptions, threads);
+        auto make_engine = [&](const std::string& path,
+                               const std::vector<std::string>& process_options,
+                               const std::vector<std::string>& setoptions) {
+            auto engine = std::make_unique<EngineProcess>(engineCommand(path, process_options), verbose);
+            initializeEngine(*engine, parsed.setoptions, threads, setoptions);
             return engine;
         };
 
@@ -4227,11 +4317,11 @@ int runSingleLog(ReplayOptions& options) {
             std::string id = engine.uciId();
             return id.empty() ? std::string("unknown") : id;
         };
-        candidate = make_engine(candidate_path, candidate_opts);
+        candidate = make_engine(candidate_path, candidate_opts, candidate_setoptions);
         std::string candidate_id = id_or_unknown(*candidate);
         std::string reference_id = "none";
         if (compare_reference) {
-            reference_engine = make_engine(reference_path, reference_opts);
+            reference_engine = make_engine(reference_path, reference_opts, reference_setoptions);
             reference_id = id_or_unknown(*reference_engine);
             candidate.reset();
             reference_engine.reset();
@@ -4256,9 +4346,16 @@ int runSingleLog(ReplayOptions& options) {
         jsonl_context.oracle_id = oracle_id;
         jsonl_context.candidate_opts = candidate_opts;
         jsonl_context.reference_opts = reference_opts;
+        jsonl_context.candidate_setoptions = candidate_setoptions;
+        jsonl_context.reference_setoptions = reference_setoptions;
         jsonl_context.oracle_opts = oracle_opts;
         jsonl_context.log_setoptions = parsed.setoptions;
-        jsonl_context.effective_setoptions = effectiveSetoptions(parsed.setoptions, threads);
+        jsonl_context.candidate_effective_setoptions = effectiveSetoptions(parsed.setoptions,
+                                                                           threads,
+                                                                           candidate_setoptions);
+        jsonl_context.reference_effective_setoptions = effectiveSetoptions(parsed.setoptions,
+                                                                           threads,
+                                                                           reference_setoptions);
         jsonl_context.oracle_limit = oracle_limit;
         jsonl_context.move_selection = jsonl_move_selection;
         jsonl_context.compare_reference = compare_reference;
@@ -4266,7 +4363,7 @@ int runSingleLog(ReplayOptions& options) {
 
         for (const auto& entry : entries) {
             if (compare_reference || !candidate)
-                candidate = make_engine(candidate_path, candidate_opts);
+                candidate = make_engine(candidate_path, candidate_opts, candidate_setoptions);
 
             std::string go_command = time_mode ? entry.logged_go : entry.replay_go;
             candidate->send(entry.position);
@@ -4286,7 +4383,7 @@ int runSingleLog(ReplayOptions& options) {
             SearchResult reference_result;
             bool reference_mismatch = false;
             if (compare_reference) {
-                reference_engine = make_engine(reference_path, reference_opts);
+                reference_engine = make_engine(reference_path, reference_opts, reference_setoptions);
                 reference_engine->send(entry.position);
                 reference_engine->send(go_command);
                 reference_result = waitForBestmove(*reference_engine, entry,

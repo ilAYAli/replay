@@ -31,6 +31,7 @@ public:
 void waitForToken(EngineProcess& engine, const std::string& token);
 void initializeEngine(EngineProcess& engine,
                       const std::vector<std::string>& setoptions,
-                      int threads);
+                      int threads,
+                      const std::vector<std::string>& extra_setoptions = {});
 void initializeReference(EngineProcess& engine);
 void resetReference(EngineProcess& engine);

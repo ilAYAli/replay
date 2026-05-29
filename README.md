@@ -16,19 +16,36 @@ Analyze logged moves:
 replay --log game.log
 ```
 
-Compare two engines:
+Replay the current build:
 
 ```sh
-replay --candidate ./new-enyo --reference ./old-enyo game.log
+replay --candidate ./build/enyo game.log
 ```
 
-Compare two configurations of the same engine:
+Replay the current build with alternate process args:
 
 ```sh
-replay --candidate ./build/enyo \
-  --reference ./build/enyo \
+replay --candidate-opts "--config ~/.config/enyo/net-a.json" \
+  --candidate ./build/enyo \
+  game.log
+```
+
+Compare against a stable reference when you need A/B output:
+
+```sh
+replay --reference ~/assets/engines/reference \
+  --candidate ./build/enyo \
+  game.log
+```
+
+Compare reference-side process args only when the baseline config is part of
+the test:
+
+```sh
+replay --reference ~/assets/engines/reference \
   --reference-opts "--config ~/.config/enyo/net-b.json" \
   --candidate-opts "--config ~/.config/enyo/net-a.json" \
+  --candidate ./build/enyo \
   game.log
 ```
 

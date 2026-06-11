@@ -179,6 +179,7 @@ Move selection defaults are meant for training target extraction:
 - `--threads N`: send UCI `Threads`. Default: `1`.
 - `--jobs N`: parallel batch jobs.
 - `--color`: color human judgment labels.
+- `--fen`: print FENs in analysis report lines.
 - `--verbose`, `-v`: print UCI traffic and FENs.
 
 The parser is deliberately pedantic: it rejects conflicting replay budgets,

@@ -3597,6 +3597,7 @@ struct ReplayOptions {
     bool time_mode = false;
     bool analyze = true;
     bool verbose = false;
+    bool include_fen = false;
     bool color_output = false;
     bool print_move_output = false;
     bool candidate_path_explicit = false;
@@ -3697,6 +3698,7 @@ void printHelp(const char* prog) {
         "  --threads N         Send `setoption name Threads value N` (default: 1)\n"
         "  --jobs N            Run up to N logs in parallel in batch mode (default: 1)\n"
         "  --color             Color judgement output\n"
+        "  --fen               Print FENs in analysis report lines\n"
         "  --verbose, -v       Print full UCI traffic and FENs\n"
         "  --help, -h          Show this help and exit\n",
         prog);
@@ -3965,6 +3967,8 @@ ParseArgsResult parseArgs(int argc, char* argv[]) {
         } else if (arg == "--color") {
             options.color_output = true;
             options.color_explicit = true;
+        } else if (arg == "--fen") {
+            options.include_fen = true;
         } else if (arg == "--verbose" || arg == "-v") {
             options.verbose = true;
             options.print_move_output = true;
@@ -4154,6 +4158,7 @@ int runSingleLog(ReplayOptions& options) {
     bool time_mode = options.time_mode;
     bool analyze = options.analyze;
     bool verbose = options.verbose;
+    bool include_fen = options.include_fen || options.verbose;
     bool color_output = options.color_output;
     bool print_move_output = options.print_move_output;
     bool reference_path_explicit = options.reference_path_explicit;
@@ -4279,7 +4284,7 @@ int runSingleLog(ReplayOptions& options) {
             } else {
                 fmt::print("\n");
             }
-            printSummaryReport(analysis_report_body, color_output, verbose);
+            printSummaryReport(analysis_report_body, color_output, include_fen);
             if (analysis_report_body.empty() || analysis_report_body.back() != '\n')
                 fmt::print("\n");
 
@@ -4515,7 +4520,7 @@ int runSingleLog(ReplayOptions& options) {
                 : replay_summary_body + "\n" + analysis_report_body;
             if (print_move_output)
                 printBatchBlock("\n");
-            printSummaryReport(text_report_body, color_output, verbose);
+            printSummaryReport(text_report_body, color_output, include_fen);
         } else {
             if (print_move_output)
                 printBatchBlock("\n");

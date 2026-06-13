@@ -51,6 +51,9 @@ replay \
 
 Analyze logged moves with a stronger net as the oracle:
 
+Use this when mining training targets: it keeps the search/eval
+implementation fixed and attributes differences mostly to the net.
+
 ```sh
 replay --log \
     --oracle ~/assets/engines/reference \

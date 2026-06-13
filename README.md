@@ -49,6 +49,15 @@ replay \
     game.log
 ```
 
+Analyze logged moves with a stronger net as the oracle:
+
+```sh
+replay --log \
+    --oracle ~/assets/engines/reference \
+    --oracle-uci "nnue_file=$HOME/code/cpp/chess/enyo/net/strong.nn" \
+    game.log
+```
+
 Pass process args only when the engine executable needs them:
 
 ```sh
@@ -155,6 +164,7 @@ Move selection defaults are meant for training target extraction:
 - `--reference-uci NAME=VAL`: extra reference UCI option; repeatable.
 - `--oracle <path>`: judge engine. Default: `stockfish`.
 - `--oracle-opts <args>`: extra oracle process args.
+- `--oracle-uci NAME=VAL`: extra oracle UCI option; repeatable.
 - `--oracle-nodes N`: oracle node budget. Default: `200000`.
 - `--oracle-depth N`: oracle depth budget; `0` follows logged depth.
 - `--log`: analyze logged moves only; no candidate replay.

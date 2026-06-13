@@ -269,9 +269,18 @@ void initializeEngine(EngineProcess& engine,
     waitForToken(engine, "readyok");
 }
 
-void initializeReference(EngineProcess& engine) {
+void initializeReference(EngineProcess& engine,
+                         const std::vector<std::string>& extra_setoptions) {
     engine.send("uci");
     waitForToken(engine, "uciok");
+
+    for (const auto& option : extra_setoptions)
+        engine.send(option);
+
+    if (!extra_setoptions.empty()) {
+        engine.send("isready");
+        waitForToken(engine, "readyok");
+    }
 }
 
 void resetReference(EngineProcess& engine) {

@@ -227,10 +227,12 @@ struct JsonlContext {
     std::vector<std::string> reference_opts;
     std::vector<std::string> candidate_setoptions;
     std::vector<std::string> reference_setoptions;
+    std::vector<std::string> oracle_setoptions;
     std::vector<std::string> oracle_opts;
     std::vector<std::string> log_setoptions;
     std::vector<std::string> candidate_effective_setoptions;
     std::vector<std::string> reference_effective_setoptions;
+    std::vector<std::string> oracle_effective_setoptions;
     ReferenceLimit oracle_limit;
     JsonlMoveSelectionOptions move_selection;
     bool compare_reference = false;
@@ -2147,16 +2149,19 @@ json baseJsonlRecord(const JsonlContext& context,
                                    context.reference_effective_setoptions)
             : engineProvenanceJson(context.oracle_path,
                                    context.oracle_opts,
-                                   context.oracle_id)},
+                                   context.oracle_id,
+                                   context.oracle_effective_setoptions)},
         {"oracle", engineProvenanceJson(context.oracle_path,
                                         context.oracle_opts,
-                                        context.oracle_id)},
+                                        context.oracle_id,
+                                        context.oracle_effective_setoptions)},
         {"log_setoptions", context.log_setoptions},
         {"effective_setoptions", context.candidate_effective_setoptions},
         {"candidate_effective_setoptions", context.candidate_effective_setoptions},
         {"reference_effective_setoptions", context.compare_reference
             ? json(context.reference_effective_setoptions)
             : json::array()},
+        {"oracle_effective_setoptions", context.oracle_effective_setoptions},
         {"replay_go", replay_go},
         {"logged_go", entry.logged_go},
         {"logged_depth", entry.depth},
@@ -3608,6 +3613,7 @@ struct ReplayOptions {
     bool reference_uci_explicit = false;
     bool oracle_path_explicit = false;
     bool oracle_opts_explicit = false;
+    bool oracle_uci_explicit = false;
     bool oracle_limit_explicit = false;
     bool replay_budget_explicit = false;
     bool jobs_explicit = false;
@@ -3626,6 +3632,7 @@ struct ReplayOptions {
     std::vector<std::string> reference_opts;
     std::vector<std::string> candidate_setoptions;
     std::vector<std::string> reference_setoptions;
+    std::vector<std::string> oracle_setoptions;
     std::vector<std::string> oracle_opts;
     std::vector<std::pair<int, std::string>> positional_args;
     std::vector<std::string> logfile_targets;
@@ -3666,6 +3673,8 @@ void printHelp(const char* prog) {
         "  --oracle <path>     Oracle engine for judging moves (default: stockfish)\n"
         "  --oracle-opts <args>\n"
         "                      Extra process args for the oracle engine\n"
+        "  --oracle-uci NAME=VAL\n"
+        "                      Extra UCI option for the oracle engine; repeatable (default: none)\n"
         "  --oracle-nodes N    Oracle analysis nodes (default: 200000)\n"
         "  --oracle-depth N    Oracle analysis depth instead of nodes; 0 follows logged depth\n"
         "  --log               Analyze logged moves instead of replayed moves;\n"
@@ -3844,6 +3853,22 @@ ParseArgsResult parseArgs(int argc, char* argv[]) {
             if (!appendEngineOpts(options.oracle_opts,
                                   arg.substr(std::string("--oracle-opts=").size()),
                                   "--oracle-opts")) {
+                result.ok = false;
+                result.exit_code = 1;
+                return result;
+            }
+        } else if (arg == "--oracle-uci" && i + 1 < argc) {
+            options.oracle_uci_explicit = true;
+            if (!appendUciSetoption(options.oracle_setoptions, argv[++i], "--oracle-uci")) {
+                result.ok = false;
+                result.exit_code = 1;
+                return result;
+            }
+        } else if (startsWith(arg, "--oracle-uci=")) {
+            options.oracle_uci_explicit = true;
+            if (!appendUciSetoption(options.oracle_setoptions,
+                                    arg.substr(std::string("--oracle-uci=").size()),
+                                    "--oracle-uci")) {
                 result.ok = false;
                 result.exit_code = 1;
                 return result;
@@ -4105,7 +4130,10 @@ bool validateArgs(ReplayOptions& options, const char* prog) {
             fmt::print(stderr, "WARNING: {} is ignored with --log.\n", options.replay_budget_option);
     }
     if (!options.analyze
-     && (options.oracle_path_explicit || options.oracle_opts_explicit || options.oracle_limit_explicit)) {
+     && (options.oracle_path_explicit
+      || options.oracle_opts_explicit
+      || options.oracle_uci_explicit
+      || options.oracle_limit_explicit)) {
         fmt::print(stderr, "ERROR: oracle options need analysis; remove them or remove --no-analysis.\n");
         return false;
     }
@@ -4166,6 +4194,7 @@ int runSingleLog(ReplayOptions& options) {
     std::vector<std::string>& reference_opts = options.reference_opts;
     std::vector<std::string>& candidate_setoptions = options.candidate_setoptions;
     std::vector<std::string>& reference_setoptions = options.reference_setoptions;
+    std::vector<std::string>& oracle_setoptions = options.oracle_setoptions;
     std::vector<std::string>& oracle_opts = options.oracle_opts;
 
     if (std::filesystem::path(logfile).extension() != ".log") {
@@ -4242,7 +4271,7 @@ int runSingleLog(ReplayOptions& options) {
             }
 
             oracle = std::make_unique<EngineProcess>(engineCommand(oracle_path, oracle_opts), verbose);
-            initializeReference(*oracle);
+            initializeReference(*oracle, oracle_setoptions);
             oracle_id = oracle->uciId().empty() ? "unknown" : oracle->uciId();
         }
 
@@ -4353,6 +4382,7 @@ int runSingleLog(ReplayOptions& options) {
         jsonl_context.reference_opts = reference_opts;
         jsonl_context.candidate_setoptions = candidate_setoptions;
         jsonl_context.reference_setoptions = reference_setoptions;
+        jsonl_context.oracle_setoptions = oracle_setoptions;
         jsonl_context.oracle_opts = oracle_opts;
         jsonl_context.log_setoptions = parsed.setoptions;
         jsonl_context.candidate_effective_setoptions = effectiveSetoptions(parsed.setoptions,
@@ -4361,6 +4391,7 @@ int runSingleLog(ReplayOptions& options) {
         jsonl_context.reference_effective_setoptions = effectiveSetoptions(parsed.setoptions,
                                                                            threads,
                                                                            reference_setoptions);
+        jsonl_context.oracle_effective_setoptions = oracle_setoptions;
         jsonl_context.oracle_limit = oracle_limit;
         jsonl_context.move_selection = jsonl_move_selection;
         jsonl_context.compare_reference = compare_reference;

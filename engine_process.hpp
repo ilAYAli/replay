@@ -33,5 +33,6 @@ void initializeEngine(EngineProcess& engine,
                       const std::vector<std::string>& setoptions,
                       int threads,
                       const std::vector<std::string>& extra_setoptions = {});
-void initializeReference(EngineProcess& engine);
+void initializeReference(EngineProcess& engine,
+                         const std::vector<std::string>& extra_setoptions = {});
 void resetReference(EngineProcess& engine);

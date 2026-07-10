@@ -39,13 +39,12 @@ replay --candidate ./build/enyo \
 ```
 
 Compare UCI options only when the engine configuration is part of the test:
-
 ```sh
 replay \
-    --reference ~/assets/engines/reference \
-    --candidate ~/assets/engines/reference \
-    --reference-uci "nnue_file=$HOME/code/cpp/chess/enyo/net/default.nn" \
-    --candidate-uci "nnue_file=$HOME/code/cpp/chess/nnue/runs/d16-rc2-secondhalf-fresh-huber-sign-lr2e7-e10-20260531/train/model.nn" \
+    --candidate ~/assets/engines/candidate \
+    --reference ~/assets/engines/candidate \
+    --candidate-uci "nnue_file=~/assets/nets/candidate.net" \
+    --reference-uci "nnue_file=~/assets/nets/nn-0ee0657fb25e.nnue" \
     game.log
 ```
 

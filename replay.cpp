@@ -4446,6 +4446,21 @@ int runSingleLog(ReplayOptions& options) {
                                           validation, entry,
                                           result.bestmove, reference_result.bestmove,
                                           display_total);
+                    if (jsonl_output && comparison_stats.positions > 0) {
+                        // A running cumulative average (not the raw per-position
+                        // delta) so that many concurrent replay processes -- e.g.
+                        // forge sharding this across a fleet -- can be combined
+                        // into one coherent trend line via a weighted average,
+                        // the same way fastchess's running LLR/Elo already work
+                        // for SPRT. Printed every position (not just divergent
+                        // ones) for a smooth, steadily-incrementing signal.
+                        double avg_diff_cp = static_cast<double>(comparison_stats.delta_loss)
+                            / comparison_stats.positions;
+                        fmt::print(stderr, "[{}/{}] avg_diff_cp: {:+.2f} n={}\n",
+                                  entry.fullmove, display_total, avg_diff_cp,
+                                  comparison_stats.positions);
+                        std::fflush(stderr);
+                    }
                     reference_suffix = validation.ok
                         ? fmt::format("reference {} | oracle {} | delta {}",
                                       reference_result.bestmove,

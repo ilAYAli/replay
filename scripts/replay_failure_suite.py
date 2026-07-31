@@ -113,9 +113,14 @@ def write_outputs(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("logs", nargs="+")
-    ap.add_argument("--candidate", required=True, help="Candidate net file")
-    ap.add_argument("--reference", required=True, help="Reference net file")
+    ap.add_argument("logs", nargs="*")
+    ap.add_argument(
+        "--from-jsonl", nargs="+", type=Path,
+        help="Summarize pre-generated replay --jsonl output instead of "
+             "invoking replay directly, e.g. shard files merged from a "
+             "distributed `forge run replay` run")
+    ap.add_argument("--candidate", help="Candidate net file")
+    ap.add_argument("--reference", help="Reference net file")
     ap.add_argument(
         "--engine-bin", default="~/assets/engines/candidate",
         help="Shared UCI engine executable both nets load into")
@@ -131,9 +136,20 @@ def main() -> None:
     ap.add_argument("--output-dir", type=Path, default=default_output_dir)
     ap.add_argument("--stderr", type=Path)
     args = ap.parse_args()
-    args.engine_bin = str(Path(args.engine_bin).expanduser())
 
-    jsonl_text = run_replay(args, args.logs)
+    if args.from_jsonl:
+        if args.logs:
+            ap.error("logs are ignored with --from-jsonl; drop the positional args")
+        jsonl_text = "\n".join(
+            path.read_text(encoding="utf-8") for path in args.from_jsonl)
+    else:
+        if not args.logs:
+            ap.error("logs is required unless --from-jsonl is given")
+        if not args.candidate or not args.reference:
+            ap.error("--candidate and --reference are required unless --from-jsonl is given")
+        args.engine_bin = str(Path(args.engine_bin).expanduser())
+        jsonl_text = run_replay(args, args.logs)
+
     rows, summary = summarize(jsonl_text)
     write_outputs(rows, summary, args.output_dir)
     print(f"positions={summary['positions']}")

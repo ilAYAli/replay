@@ -4539,6 +4539,15 @@ int runSingleLog(ReplayOptions& options) {
                                                             game_report, timeout_report);
             }
             if (jsonl_output) {
+                // --jsonl reserves stdout for data records, but the human
+                // comparison report (positions/candidate-better/diff, plus
+                // per-position [N/Total] ... diff: lines) is still useful as
+                // a progress/quality signal for callers driving many
+                // parallel replay processes (e.g. forge). Print it to
+                // stderr rather than discarding it.
+                if (!analysis_report_body.empty())
+                    fmt::print(stderr, "{}", analysis_report_body);
+                std::fflush(stderr);
                 std::string jsonl_report_body = jsonl_buffer.str();
                 fmt::print("{}", jsonl_report_body);
                 if (!jsonl_report_body.empty() && jsonl_report_body.back() != '\n')

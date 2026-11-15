@@ -4,7 +4,8 @@
 #include <cmath>
 #include <map>
 
-#include <fmt/format.h>
+#include <format>
+#include <print>
 
 namespace {
 
@@ -131,11 +132,11 @@ int scoreAsLichessCp(Score score) {
 
 std::string formatScore(Score score) {
     if (score.kind == ScoreKind::Cp)
-        return score.value == 0 ? "0cp" : fmt::format("{:+}cp", score.value);
+        return score.value == 0 ? "0cp" : std::format("{:+}cp", score.value);
     if (score.kind == ScoreKind::Mate) {
         if (score.value >= 0)
-            return fmt::format("M{}", score.value);
-        return fmt::format("-M{}", std::abs(score.value));
+            return std::format("M{}", score.value);
+        return std::format("-M{}", std::abs(score.value));
     }
     return "n/a";
 }

@@ -23,7 +23,8 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-#include <fmt/format.h>
+#include <format>
+#include <print>
 #include <nlohmann/json.hpp>
 
 #include "engine_process.hpp"
@@ -285,7 +286,7 @@ std::string formatDiagnosticLine(const std::string& line,
     body = trim(body);
 
     size_t fullmove_width = std::to_string(std::max(1, display_total)).size();
-    return fmt::format("{}: [{:>{}}/{}]{}",
+    return std::format("{}: [{:>{}}/{}]{}",
                        label, fullmove, fullmove_width, display_total,
                        body.empty() ? "" : " " + body);
 }
@@ -424,18 +425,18 @@ std::string formatMillis(int milliseconds) {
     if (milliseconds < 0)
         return "?";
     if (milliseconds >= 1000)
-        return fmt::format("{:.1f}s", milliseconds / 1000.0);
-    return fmt::format("{}ms", milliseconds);
+        return std::format("{:.1f}s", milliseconds / 1000.0);
+    return std::format("{}ms", milliseconds);
 }
 
 std::string formatNodeCount(long long nodes) {
     if (nodes >= 1'000'000'000)
-        return fmt::format("{:.1f}B", static_cast<double>(nodes) / 1'000'000'000.0);
+        return std::format("{:.1f}B", static_cast<double>(nodes) / 1'000'000'000.0);
     if (nodes >= 1'000'000)
-        return fmt::format("{:.1f}M", static_cast<double>(nodes) / 1'000'000.0);
+        return std::format("{:.1f}M", static_cast<double>(nodes) / 1'000'000.0);
     if (nodes >= 1'000)
-        return fmt::format("{:.1f}K", static_cast<double>(nodes) / 1'000.0);
-    return fmt::format("{}", nodes);
+        return std::format("{:.1f}K", static_cast<double>(nodes) / 1'000.0);
+    return std::format("{}", nodes);
 }
 
 std::string replayGoCommand(const std::string& logged_go,
@@ -444,15 +445,15 @@ std::string replayGoCommand(const std::string& logged_go,
                             long long fixed_replay_nodes,
                             int fixed_replay_movetime_ms) {
     if (fixed_replay_nodes > 0)
-        return fmt::format("go nodes {}", fixed_replay_nodes);
+        return std::format("go nodes {}", fixed_replay_nodes);
     if (fixed_replay_movetime_ms > 0)
-        return fmt::format("go movetime {}", fixed_replay_movetime_ms);
+        return std::format("go movetime {}", fixed_replay_movetime_ms);
     if (logged_nodes <= 0)
         return logged_go;
     long long nodes = max_replay_nodes > 0
         ? std::min(logged_nodes, max_replay_nodes)
         : logged_nodes;
-    return fmt::format("go nodes {}", nodes);
+    return std::format("go nodes {}", nodes);
 }
 
 std::string formatSearchProgress(const std::string& go_command,
@@ -460,22 +461,22 @@ std::string formatSearchProgress(const std::string& go_command,
                                  long long current_nodes) {
     long long target_nodes = parseLongField(go_command, "nodes");
     if (target_nodes > 0)
-        return fmt::format("depth {} | nodes {}/{}",
+        return std::format("depth {} | nodes {}/{}",
                            current_depth,
                            formatNodeCount(std::max(0LL, current_nodes)),
                            formatNodeCount(target_nodes));
 
     int target_depth = parseIntField(go_command, "depth");
     if (target_depth > 0)
-        return fmt::format("depth {}/{}", current_depth, target_depth);
+        return std::format("depth {}/{}", current_depth, target_depth);
 
     int wtime = parseIntField(go_command, "wtime");
     int btime = parseIntField(go_command, "btime");
     if (wtime >= 0 || btime >= 0)
-        return fmt::format("depth {} | time w {} b {}",
+        return std::format("depth {} | time w {} b {}",
                            current_depth, formatMillis(wtime), formatMillis(btime));
 
-    return fmt::format("depth {}", current_depth);
+    return std::format("depth {}", current_depth);
 }
 
 std::string formatBatchSearchProgress(const std::string& go_command,
@@ -485,14 +486,14 @@ std::string formatBatchSearchProgress(const std::string& go_command,
                                       long long current_nodes) {
     long long target_nodes = parseLongField(go_command, "nodes");
     if (target_nodes > 0)
-        return fmt::format("[{}/{}] nodes {}/{} depth {}",
+        return std::format("[{}/{}] nodes {}/{} depth {}",
                            fullmove,
                            display_total,
                            formatNodeCount(std::max(0LL, current_nodes)),
                            formatNodeCount(target_nodes),
                            current_depth);
 
-    return fmt::format("[{}/{}] {}", fullmove, display_total,
+    return std::format("[{}/{}] {}", fullmove, display_total,
                        formatSearchProgress(go_command, current_depth, current_nodes));
 }
 
@@ -568,7 +569,7 @@ template <enyo::Color Us>
 std::optional<enyo::Move> resolveUciMoveForSide(enyo::Board& board, std::string_view uci) {
     const Movelist moves = generate_legal_moves<Us, false, false>(board);
     for (auto move : moves) {
-        if (fmt::format("{}", move) == uci)
+        if (std::format("{}", move) == uci)
             return move;
     }
 
@@ -677,7 +678,7 @@ std::optional<std::string> positionAfterMove(const std::string& position,
             return position + " " + move;
         return position + " moves " + move;
     }
-    return fmt::format("position fen {}", board->fen());
+    return std::format("position fen {}", board->fen());
 }
 
 std::vector<std::string> splitMoves(std::string_view text) {
@@ -808,14 +809,14 @@ std::vector<std::string> immediateCheckmateMoves(enyo::Board board) {
             enyo::Board next = board;
             apply_move<enyo::white>(next, move);
             if (!hasLegalMoves(next) && isInCheck(next))
-                mates.push_back(fmt::format("{}", move));
+                mates.push_back(std::format("{}", move));
         }
     } else {
         for (const auto& move : generate_legal_moves<enyo::black, false, false>(board)) {
             enyo::Board next = board;
             apply_move<enyo::black>(next, move);
             if (!hasLegalMoves(next) && isInCheck(next))
-                mates.push_back(fmt::format("{}", move));
+                mates.push_back(std::format("{}", move));
         }
     }
     return mates;
@@ -924,7 +925,7 @@ void collectTacticalMovesForSide(const enyo::Board& board,
                                  std::vector<std::pair<std::string, std::string>>& roles) {
     enyo::Board copy = board;
     for (auto move : generate_legal_moves<Us, false, false>(copy)) {
-        std::string uci = fmt::format("{}", move);
+        std::string uci = std::format("{}", move);
         if (options.include_captures && isCaptureMove(move))
             roles.push_back({uci, "capture"});
         if (options.include_promotions && isPromotionMove(move))
@@ -1103,9 +1104,9 @@ std::string jsonlScoreKind(Score score) {
 
 std::string jsonlScoreRaw(Score score) {
     if (score.kind == ScoreKind::Cp)
-        return fmt::format("cp {}", score.value);
+        return std::format("cp {}", score.value);
     if (score.kind == ScoreKind::Mate)
-        return fmt::format("mate {}", score.value);
+        return std::format("mate {}", score.value);
     return "none";
 }
 
@@ -1166,7 +1167,7 @@ ReplayLineWidths replayLineWidths(const std::vector<LogEntry>& entries, int disp
     for (const auto& entry : entries) {
         std::string expected = formatMoveDisplay(entry.position, entry.expected);
         widths.replay = std::max(widths.replay, expected.size());
-        widths.replay = std::max(widths.replay, fmt::format("{} != log {}", expected, expected).size());
+        widths.replay = std::max(widths.replay, std::format("{} != log {}", expected, expected).size());
     }
     return widths;
 }
@@ -1230,18 +1231,18 @@ std::string colorizeGameStatusLine(const std::string& line, bool color) {
 
 std::string analysisPlayedText(const AnalysisEntry& entry) {
     size_t fullmove_width = std::to_string(std::max(1, entry.display_total)).size();
-    std::string played = fmt::format("[{:>{}}/{}] {}",
+    std::string played = std::format("[{:>{}}/{}] {}",
                                      entry.fullmove, fullmove_width,
                                      entry.display_total, entry.played);
     if (!entry.expected.empty())
-        played += fmt::format(" != log {}", entry.expected);
+        played += std::format(" != log {}", entry.expected);
     return played;
 }
 
 std::string analysisEvalText(const AnalysisEntry& entry) {
     if (entry.eval_before.empty() || entry.eval_after.empty())
         return "";
-    return fmt::format("{} -> {}", entry.eval_before, entry.eval_after);
+    return std::format("{} -> {}", entry.eval_before, entry.eval_after);
 }
 
 AnalysisWidths analysisWidths(const std::vector<AnalysisEntry>& entries) {
@@ -1250,7 +1251,7 @@ AnalysisWidths analysisWidths(const std::vector<AnalysisEntry>& entries) {
         widths.played = std::max(widths.played, analysisPlayedText(entry).size());
         widths.best = std::max(widths.best, entry.best.size());
         widths.eval = std::max(widths.eval, analysisEvalText(entry).size());
-        widths.loss = std::max(widths.loss, fmt::format("{}cp", entry.cp_loss).size());
+        widths.loss = std::max(widths.loss, std::format("{}cp", entry.cp_loss).size());
     }
     return widths;
 }
@@ -1259,13 +1260,13 @@ std::string formatAnalysisEntry(const AnalysisEntry& entry,
                                 const AnalysisWidths& widths,
                                 bool color,
                                 bool include_fen) {
-    std::string label = colorizeJudgementToken(fmt::format("{:<11}", entry.label + ":"),
+    std::string label = colorizeJudgementToken(std::format("{:<11}", entry.label + ":"),
                                                entry.label, color);
-    std::string line = fmt::format("{} {:<{}}  best: {:<{}}  eval: {:<{}}  loss: {:>{}}",
+    std::string line = std::format("{} {:<{}}  best: {:<{}}  eval: {:<{}}  loss: {:>{}}",
                                    label, analysisPlayedText(entry), widths.played,
                                    entry.best, widths.best,
                                    analysisEvalText(entry), widths.eval,
-                                   fmt::format("{}cp", entry.cp_loss), widths.loss);
+                                   std::format("{}cp", entry.cp_loss), widths.loss);
     if (include_fen && !entry.fen.empty())
         line += "  FEN: " + entry.fen;
     return line;
@@ -1275,32 +1276,32 @@ std::string formatReferenceInline(const MoveValidation& validation, bool color) 
     constexpr size_t judgement_width = 9;
 
     if (!validation.ok)
-        return fmt::format("{:<{}}", "n/a", judgement_width);
+        return std::format("{:<{}}", "n/a", judgement_width);
 
     std::string best_report;
     if (!validation.reference_best
      && !validation.bestmove.empty()
      && validation.bestmove != "(none)") {
-        best_report = fmt::format(" | best {}",
+        best_report = std::format(" | best {}",
                                   validation.best_display.empty() ? validation.bestmove
                                                                   : validation.best_display);
     }
 
     if (isReportableJudgement(validation.label)) {
-        std::string judgement = fmt::format("{} {}cp", validation.label, validation.cp_loss);
-        return fmt::format("oracle {}{}",
-                           colorizeJudgementToken(fmt::format("{:<{}}", judgement, judgement_width),
+        std::string judgement = std::format("{} {}cp", validation.label, validation.cp_loss);
+        return std::format("oracle {}{}",
+                           colorizeJudgementToken(std::format("{:<{}}", judgement, judgement_width),
                                                   validation.label, color),
                            best_report);
     }
 
     std::string judgement = validation.reference_best
-        ? (validation.best_score.empty() ? "best" : fmt::format("best {}", validation.best_score))
-        : (validation.cp_loss == 0 ? "equal" : fmt::format("loss {}cp", validation.cp_loss));
+        ? (validation.best_score.empty() ? "best" : std::format("best {}", validation.best_score))
+        : (validation.cp_loss == 0 ? "equal" : std::format("loss {}cp", validation.cp_loss));
     std::string label = validation.reference_best || validation.cp_loss == 0 ? "best" : "";
 
-    return fmt::format("oracle {}{}",
-                       colorizeJudgementToken(fmt::format("{:<{}}", judgement, judgement_width), label, color),
+    return std::format("oracle {}{}",
+                       colorizeJudgementToken(std::format("{:<{}}", judgement, judgement_width), label, color),
                        best_report);
 }
 
@@ -1357,20 +1358,20 @@ std::string displayAnalysisReport(const std::string& report, bool color, bool in
             int avg_loss = -1;
             if (std::sscanf(line.c_str(), "accuracy: %d%% avg loss: %dcp",
                             &accuracy, &avg_loss) == 2) {
-                normalized += fmt::format("{:<11} {}%\n", "accuracy:", accuracy);
-                normalized += fmt::format("{:<11} {}cp\n", "avg loss:", avg_loss);
+                normalized += std::format("{:<11} {}%\n", "accuracy:", accuracy);
+                normalized += std::format("{:<11} {}cp\n", "avg loss:", avg_loss);
                 continue;
             }
         } else if (startsWith(line, "accuracy:")) {
             int accuracy = -1;
             if (std::sscanf(line.c_str(), "accuracy: %d%%", &accuracy) == 1) {
-                normalized += fmt::format("{:<11} {}%\n", "accuracy:", accuracy);
+                normalized += std::format("{:<11} {}%\n", "accuracy:", accuracy);
                 continue;
             }
         } else if (startsWith(line, "avg loss:")) {
             int avg_loss = -1;
             if (std::sscanf(line.c_str(), "avg loss: %dcp", &avg_loss) == 1) {
-                normalized += fmt::format("{:<11} {}cp\n", "avg loss:", avg_loss);
+                normalized += std::format("{:<11} {}cp\n", "avg loss:", avg_loss);
                 continue;
             }
         }
@@ -1386,16 +1387,16 @@ bool batchMode() {
 
 void printSearchProgress(const std::string& text) {
     if (batchMode()) {
-        fmt::print("{}{}\n", kBatchProgressPrefix, text);
+        std::print("{}{}\n", kBatchProgressPrefix, text);
     } else {
-        fmt::print("\r\033[K{}", text);
+        std::print("\r\033[K{}", text);
     }
     std::fflush(stdout);
 }
 
 void clearSearchProgress() {
     if (!batchMode())
-        fmt::print("\r\033[K");
+        std::print("\r\033[K");
 }
 
 std::string batchIndent(const std::string& text) {
@@ -1414,7 +1415,7 @@ std::string batchIndent(const std::string& text) {
 }
 
 void printBatchBlock(const std::string& text) {
-    fmt::print("{}", batchIndent(text));
+    std::print("{}", batchIndent(text));
 }
 
 void printSummaryReport(const std::string& report, bool color, bool include_fen) {
@@ -1449,7 +1450,7 @@ std::string formatTimeoutReport(const std::vector<LogEntry>& entries, int displa
     if (opponentHasImmediateCheckmateAfterMove(entry))
         return "";
 
-    return fmt::format("{:<11} [{:>{}}/{}] {} clock reached {} on final move\n",
+    return std::format("{:<11} [{:>{}}/{}] {} clock reached {} on final move\n",
                        "timeout:",
                        entry.fullmove,
                        fullmove_width,
@@ -1463,14 +1464,14 @@ std::string formatGameStatusReport(const std::vector<LogEntry>& entries,
     if (entries.empty())
         return "";
     if (!timeout_report.empty())
-        return fmt::format("{:<11} {}\n", "game:", "lost on time");
+        return std::format("{:<11} {}\n", "game:", "lost on time");
 
     auto status = terminalStatusAfterMove(entries.back());
     if (!status)
         return "";
 
     std::string reason = status->reason.empty() ? "" : " " + status->reason;
-    return fmt::format("{:<11} {}{}\n", "game:", status->result, reason);
+    return std::format("{:<11} {}{}\n", "game:", status->result, reason);
 }
 
 bool sameLogEntry(const LogEntry& lhs, const LogEntry& rhs) {
@@ -1487,7 +1488,7 @@ void printLogMoveLine(const LogEntry& entry,
                       bool include_fen) {
     std::string played_display = formatMoveDisplay(entry.position, entry.expected);
     std::string reference_suffix = formatReferenceInline(validation, color);
-    printBatchBlock(fmt::format("[{:>{}}/{}] {:<{}} :: {}\n",
+    printBatchBlock(std::format("[{:>{}}/{}] {:<{}} :: {}\n",
                                 entry.fullmove, widths.fullmove, display_total,
                                 played_display, widths.replay,
                                 reference_suffix));
@@ -1504,7 +1505,7 @@ std::string formatAccuracyReport(const AnalysisStats& stats) {
     int accuracy = lichessGameAccuracy(stats.side_sign, stats.ply_scores)
         .value_or(std::clamp(static_cast<int>(std::lround(stats.accuracy / stats.moves)), 0, 100));
     int avg_loss = static_cast<int>(std::lround(static_cast<double>(stats.cp_loss) / stats.moves));
-    return fmt::format("{:<11} {}%\n{:<11} {}cp\n",
+    return std::format("{:<11} {}%\n{:<11} {}cp\n",
                        "accuracy:", accuracy,
                        "avg loss:", avg_loss);
 }
@@ -1519,7 +1520,7 @@ std::string formatGameScoreReport(const AnalysisStats& stats) {
         : mean_accuracy;
     int score = std::clamp(static_cast<int>(std::lround((mean_accuracy + harmonic_accuracy) / 2.0)),
                            0, 100);
-    return fmt::format("{:<11} {}\n", "score:", score);
+    return std::format("{:<11} {}\n", "score:", score);
 }
 
 std::string formatReplaySummaryReport(int searched,
@@ -1527,7 +1528,7 @@ std::string formatReplaySummaryReport(int searched,
                                       double final_wdl,
                                       double min_wdl,
                                       double max_wdl) {
-    return fmt::format("positions:  {}\n"
+    return std::format("positions:  {}\n"
                        "matches:    {}/{} ({} differed)\n"
                        "final wdl:  {:+.2f}\n"
                        "wdl range:  [{:+.2f}, {:+.2f}]\n",
@@ -1541,12 +1542,12 @@ std::string formatReplaySummaryReport(int searched,
 }
 
 std::string formatSignedCp(long long value) {
-    return fmt::format("{:+}cp", value);
+    return std::format("{:+}cp", value);
 }
 
 std::string comparisonMoveText(const ComparisonEntry& entry) {
     size_t fullmove_width = std::to_string(std::max(1, entry.display_total)).size();
-    return fmt::format("[{:>{}}/{}] {}",
+    return std::format("[{:>{}}/{}] {}",
                        entry.fullmove, fullmove_width,
                        entry.display_total, entry.candidate);
 }
@@ -1564,7 +1565,7 @@ ComparisonWidths comparisonWidths(const std::vector<ComparisonEntry>& entries) {
 
 std::string formatComparisonEntry(const ComparisonEntry& entry,
                                   const ComparisonWidths& widths) {
-    return fmt::format("{:<17} {:<{}}  reference: {:<{}}  oracle: {:<{}}  loss: {}/{}  diff: {:>{}}",
+    return std::format("{:<17} {:<{}}  reference: {:<{}}  oracle: {:<{}}  loss: {}/{}  diff: {:>{}}",
                        entry.label + ":",
                        comparisonMoveText(entry), widths.candidate,
                        entry.reference, widths.reference,
@@ -1597,9 +1598,9 @@ std::string formatComparisonReport(const std::vector<ComparisonEntry>& report,
     }
 
     if (stats.failures > 0)
-        output += fmt::format("Analysis failures  : {}\n", stats.failures);
+        output += std::format("Analysis failures  : {}\n", stats.failures);
 
-    output += fmt::format("positions:         {}\n"
+    output += std::format("positions:         {}\n"
                           "candidate better:  {}\n"
                           "reference better:  {}\n"
                           "equal:             {}\n"
@@ -1635,7 +1636,7 @@ std::string formatAnalysisReport(const std::vector<AnalysisEntry>& report,
     }
 
     if (analysis_failures > 0)
-        output += fmt::format("Analysis failures  : {}\n", analysis_failures);
+        output += std::format("Analysis failures  : {}\n", analysis_failures);
     output += timeout_report;
     output += formatAccuracyReport(stats);
     output += game_report;
@@ -1799,12 +1800,12 @@ std::string shellQuote(const std::string& value) {
 
 std::filesystem::path tempOutputPath(size_t index) {
     auto directory = std::filesystem::temp_directory_path();
-    return directory / fmt::format("replay-job-{}-{}.out", getpid(), index);
+    return directory / std::format("replay-job-{}-{}.out", getpid(), index);
 }
 
 std::filesystem::path tempJsonlPath(size_t index) {
     auto directory = std::filesystem::temp_directory_path();
-    return directory / fmt::format("replay-job-{}-{}.jsonl", getpid(), index);
+    return directory / std::format("replay-job-{}-{}.jsonl", getpid(), index);
 }
 
 std::vector<std::string> effectiveSetoptions(const std::vector<std::string>& log_setoptions,
@@ -1812,7 +1813,7 @@ std::vector<std::string> effectiveSetoptions(const std::vector<std::string>& log
                                              const std::vector<std::string>& extra_setoptions) {
     std::vector<std::string> setoptions = log_setoptions;
     if (threads > 0)
-        setoptions.push_back(fmt::format("setoption name Threads value {}", threads));
+        setoptions.push_back(std::format("setoption name Threads value {}", threads));
     setoptions.insert(setoptions.end(), extra_setoptions.begin(), extra_setoptions.end());
     return setoptions;
 }
@@ -1858,22 +1859,22 @@ ReferenceResult referenceSearch(EngineProcess& engine,
 
     if (progress) {
         if (limit.kind == ReferenceLimitKind::Nodes)
-            printSearchProgress(fmt::format("{} nodes {}/{}",
+            printSearchProgress(std::format("{} nodes {}/{}",
                                             progress_text,
                                             formatNodeCount(0),
                                             formatNodeCount(target)));
         else
-            printSearchProgress(fmt::format("{} depth 0/{}", progress_text, target));
+            printSearchProgress(std::format("{} depth 0/{}", progress_text, target));
     }
 
     engine.send(position);
     std::string go_limit = limit.kind == ReferenceLimitKind::Nodes
-        ? fmt::format("nodes {}", target)
-        : fmt::format("depth {}", target);
+        ? std::format("nodes {}", target)
+        : std::format("depth {}", target);
     if (search_move.empty())
-        engine.send(fmt::format("go {}", go_limit));
+        engine.send(std::format("go {}", go_limit));
     else
-        engine.send(fmt::format("go {} searchmoves {}", go_limit, search_move));
+        engine.send(std::format("go {} searchmoves {}", go_limit, search_move));
 
     while (true) {
         auto line = engine.readLine();
@@ -1887,7 +1888,7 @@ ReferenceResult referenceSearch(EngineProcess& engine,
                 long long current_nodes = parseLongField(*line, "nodes");
                 if (current_nodes > 0 && current_nodes != last_reported_nodes) {
                     last_reported_nodes = current_nodes;
-                    printSearchProgress(fmt::format("{} nodes {}/{}",
+                    printSearchProgress(std::format("{} nodes {}/{}",
                                                     progress_text,
                                                     formatNodeCount(std::min(current_nodes,
                                                                              static_cast<long long>(target))),
@@ -1897,7 +1898,7 @@ ReferenceResult referenceSearch(EngineProcess& engine,
                 int current_depth = extractDepth(*line);
                 if (current_depth > 0 && current_depth != last_reported_depth) {
                     last_reported_depth = current_depth;
-                    printSearchProgress(fmt::format("{} depth {}/{}",
+                    printSearchProgress(std::format("{} depth {}/{}",
                                                     progress_text,
                                                     current_depth,
                                                     target));
@@ -1933,7 +1934,7 @@ MoveValidation validateMove(EngineProcess& reference,
                                           position,
                                           resolved_limit,
                                           progress,
-                                          fmt::format("{} [{}/{}] reference-best",
+                                          std::format("{} [{}/{}] reference-best",
                                                       progress_verb, fullmove, display_total),
                                           "",
                                           reset_reference);
@@ -1963,7 +1964,7 @@ MoveValidation validateMove(EngineProcess& reference,
                                      position,
                                      resolved_limit,
                                      progress,
-                                     fmt::format("{} [{}/{}] played-move",
+                                     std::format("{} [{}/{}] played-move",
                                                  progress_verb, fullmove, display_total),
                                      played_move,
                                      true);
@@ -1979,7 +1980,7 @@ MoveValidation validateMove(EngineProcess& reference,
                                  *played_position,
                                  resolved_limit,
                                  progress,
-                                 fmt::format("{} [{}/{}] played-position",
+                                 std::format("{} [{}/{}] played-position",
                                              progress_verb, fullmove, display_total),
                                  "",
                                  false);
@@ -2051,7 +2052,7 @@ ComparisonValidation validateComparison(EngineProcess& oracle,
                                           position,
                                           resolved_limit,
                                           progress,
-                                          fmt::format("analyzing [{}/{}] oracle-best",
+                                          std::format("analyzing [{}/{}] oracle-best",
                                                       fullmove, display_total),
                                           "",
                                           true);
@@ -2064,7 +2065,7 @@ ComparisonValidation validateComparison(EngineProcess& oracle,
                                                    position,
                                                    resolved_limit,
                                                    progress,
-                                                   fmt::format("analyzing [{}/{}] candidate-move",
+                                                   std::format("analyzing [{}/{}] candidate-move",
                                                                fullmove, display_total),
                                                    candidate_move,
                                                    best);
@@ -2079,7 +2080,7 @@ ComparisonValidation validateComparison(EngineProcess& oracle,
                              position,
                              resolved_limit,
                              progress,
-                             fmt::format("analyzing [{}/{}] reference-move",
+                             std::format("analyzing [{}/{}] reference-move",
                                          fullmove, display_total),
                              reference_move,
                              best);
@@ -2183,7 +2184,7 @@ json baseJsonlRecord(const JsonlContext& context,
 
     return json{
         {"schema", "enyo.replay.v1"},
-        {"id", fmt::format("{}-{}", context.game_id, ply_before)},
+        {"id", std::format("{}-{}", context.game_id, ply_before)},
         {"source_log", absolute_log},
         {"log_path", absolute_log},
         {"source_file", context.log_path.filename().string()},
@@ -2598,12 +2599,12 @@ std::unordered_map<int, PositionEvaluation> analyzeFishnetPositionSequence(Engin
         auto search_position = [&](int ply, bool store) {
             searched++;
             std::string position = positionFromSequence(sequence, ply);
-            std::string progress_text = fmt::format("analyzing position {}/{}",
+            std::string progress_text = std::format("analyzing position {}/{}",
                                                     searched, total_searches);
             if (store)
-                progress_text += fmt::format(" ply {}/{}", ply, max_ply);
+                progress_text += std::format(" ply {}/{}", ply, max_ply);
             else
-                progress_text += fmt::format(" warmup ply {}/{}", ply, max_ply);
+                progress_text += std::format(" warmup ply {}/{}", ply, max_ply);
 
             PositionEvaluation evaluation;
             try {
@@ -2835,9 +2836,9 @@ bool analyzeLoggedPositionSequence(EngineProcess& reference,
 
         MoveValidation validation;
         if (before == evaluations.end()) {
-            validation.error = fmt::format("missing reference evaluation for ply {}", ply_before);
+            validation.error = std::format("missing reference evaluation for ply {}", ply_before);
         } else if (after == evaluations.end()) {
-            validation.error = fmt::format("missing reference evaluation for ply {}", ply_after);
+            validation.error = std::format("missing reference evaluation for ply {}", ply_after);
         } else {
             validation = validationFromPositionEvaluations(entry, before->second, after->second);
         }
@@ -2906,7 +2907,7 @@ SearchResult waitForBestmove(EngineProcess& engine,
                                                                   depth,
                                                                   nodes));
                 } else {
-                    printSearchProgress(fmt::format(
+                    printSearchProgress(std::format(
                         "{} thinking [{}/{}] {} | WDL {:+.2f} | expecting {}",
                         sideToMoveName(entry.position), entry.fullmove, display_total,
                         formatSearchProgress(go_command, depth, nodes),
@@ -2933,7 +2934,7 @@ ParsedLog readLog(const std::filesystem::path& logfile,
                   int fixed_replay_movetime_ms) {
     std::ifstream file(logfile);
     if (!file.is_open())
-        throw std::runtime_error(fmt::format("failed to open logfile: {}", logfile.string()));
+        throw std::runtime_error(std::format("failed to open logfile: {}", logfile.string()));
 
     std::streampos first_ucinewgame = -1;
     std::string line;
@@ -3219,7 +3220,7 @@ void printJobOutput(const std::filesystem::path& path, bool to_stderr) {
     while (std::getline(file, line)) {
         if (startsWith(line, kBatchProgressPrefix))
             continue;
-        fmt::print(to_stderr ? stderr : stdout, "{}\n", line);
+        std::print(to_stderr ? stderr : stdout, "{}\n", line);
     }
 }
 
@@ -3371,7 +3372,7 @@ std::string formatBatchComparisonSummary(const BatchComparisonSummary& summary) 
         : static_cast<int>(std::lround(static_cast<double>(summary.diff)
                                      / static_cast<double>(summary.positions)));
 
-    return fmt::format("\nBatch comparison:\n"
+    return std::format("\nBatch comparison:\n"
                        "logs:              {}\n"
                        "positions:         {}\n"
                        "candidate better:  {} logs, {} moves\n"
@@ -3410,7 +3411,7 @@ int waitForBatchJob(const RunningJob& job,
                 waitpid(job.pid, nullptr, 0);
                 return 128 + SIGINT;
             }
-            throw std::runtime_error(fmt::format("waitpid failed: {}", strerror(errno)));
+            throw std::runtime_error(std::format("waitpid failed: {}", strerror(errno)));
         }
         if (done == 0) {
             usleep(100000);
@@ -3429,7 +3430,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
             bool jsonl_output,
             bool aggregate_comparison) {
     if (logs.empty()) {
-        fmt::print(stderr, "ERROR: No .log files found\n");
+        std::print(stderr, "ERROR: No .log files found\n");
         return 1;
     }
     if (logs.size() < 2)
@@ -3440,7 +3441,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
     setenv(kReplayBatch, "1", 1);
     if (jobs <= 1) {
         for (size_t i = 0; i < logs.size(); ++i) {
-            fmt::print(jsonl_output ? stderr : stdout,
+            std::print(jsonl_output ? stderr : stdout,
                        "\n[{}/{}] {}\n", i + 1, logs.size(), logs[i].filename().string());
             std::fflush(jsonl_output ? stderr : stdout);
 
@@ -3450,7 +3451,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
                                                logs[i], output_path, jsonl_output_path);
             pid_t pid = startBatchJob(command);
             if (pid < 0)
-                throw std::runtime_error(fmt::format("failed to start job: {}", strerror(errno)));
+                throw std::runtime_error(std::format("failed to start job: {}", strerror(errno)));
             int rc = waitForBatchJob({pid, i, output_path, jsonl_output_path,
                                       std::chrono::steady_clock::now()},
                                      logs, i, jsonl_output);
@@ -3469,7 +3470,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
                 failures++;
         }
         if (aggregate_comparison)
-            fmt::print(jsonl_output ? stderr : stdout, "{}",
+            std::print(jsonl_output ? stderr : stdout, "{}",
                        formatBatchComparisonSummary(comparison_summary));
         return failures == 0 ? 0 : 1;
     }
@@ -3479,7 +3480,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
     std::vector<std::filesystem::path> jsonl_output_paths(logs.size());
     size_t next = 0;
     size_t completed = 0;
-    fmt::print(jsonl_output ? stderr : stdout,
+    std::print(jsonl_output ? stderr : stdout,
                "Running {} logs with {} jobs; output prints as each log finishes.\n",
                logs.size(), jobs);
     std::fflush(jsonl_output ? stderr : stdout);
@@ -3491,20 +3492,20 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
                                            logs[next], output_path, jsonl_output_path);
         pid_t pid = startBatchJob(command);
         if (pid < 0)
-            throw std::runtime_error(fmt::format("failed to start job: {}", strerror(errno)));
+            throw std::runtime_error(std::format("failed to start job: {}", strerror(errno)));
         output_paths[next] = output_path;
         jsonl_output_paths[next] = jsonl_output_path;
         running.push_back({pid, next, output_path, jsonl_output_path,
                            std::chrono::steady_clock::now()});
         if (completed == 0) {
-            fmt::print(jsonl_output ? stderr : stdout,
+            std::print(jsonl_output ? stderr : stdout,
                        "analyzing [{}/{}] {}\n", next + 1, logs.size(), logs[next].filename().string());
             std::fflush(jsonl_output ? stderr : stdout);
         }
         next++;
     };
     auto print_finished = [&](const RunningJob& job, int status) {
-        fmt::print(jsonl_output ? stderr : stdout,
+        std::print(jsonl_output ? stderr : stdout,
                    "\n[{}/{}] {}\n",
                    job.index + 1, logs.size(), logs[job.index].filename().string());
         printJobOutput(job.output_path, jsonl_output);
@@ -3540,7 +3541,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
                     terminateJobs(running);
                     return 128 + SIGINT;
                 }
-                throw std::runtime_error(fmt::format("waitpid failed: {}", strerror(errno)));
+                throw std::runtime_error(std::format("waitpid failed: {}", strerror(errno)));
             }
             if (done == 0) {
                 usleep(100000);
@@ -3576,7 +3577,7 @@ int runLogs(const std::vector<std::filesystem::path>& logs,
     }
 
     if (aggregate_comparison)
-        fmt::print(jsonl_output ? stderr : stdout, "{}",
+        std::print(jsonl_output ? stderr : stdout, "{}",
                    formatBatchComparisonSummary(comparison_summary));
 
     return failures == 0 ? 0 : 1;
@@ -3647,7 +3648,7 @@ struct ParseArgsResult {
 };
 
 void printHelp(const char* prog) {
-    fmt::print(
+    std::print(
         "Usage: {} [options] <logfile-or-directory> [more logs...]\n"
         "\n"
         "Replay UCI log searches and compare candidate output with a reference engine.\n"
@@ -3721,7 +3722,7 @@ bool appendEngineOpts(std::vector<std::string>& target,
         target.insert(target.end(), parsed.begin(), parsed.end());
         return true;
     } catch (const std::exception& ex) {
-        fmt::print(stderr, "ERROR: Invalid {}: {}\n", option, ex.what());
+        std::print(stderr, "ERROR: Invalid {}: {}\n", option, ex.what());
         return false;
     }
 }
@@ -3732,24 +3733,24 @@ bool appendUciSetoption(std::vector<std::string>& target,
     std::string text = expandTilde(std::string(value));
     size_t equals = text.find('=');
     if (equals == std::string::npos) {
-        fmt::print(stderr, "ERROR: Invalid {}: expected NAME=VAL\n", option);
+        std::print(stderr, "ERROR: Invalid {}: expected NAME=VAL\n", option);
         return false;
     }
 
     std::string name = trim(text.substr(0, equals));
     std::string option_value = trim(text.substr(equals + 1));
     if (name.empty()) {
-        fmt::print(stderr, "ERROR: Invalid {}: empty UCI option name\n", option);
+        std::print(stderr, "ERROR: Invalid {}: empty UCI option name\n", option);
         return false;
     }
 
-    target.push_back(fmt::format("setoption name {} value {}", name, option_value));
+    target.push_back(std::format("setoption name {} value {}", name, option_value));
     return true;
 }
 
 bool setReplayBudget(ReplayOptions& options, const char* option) {
     if (!options.replay_budget_option.empty()) {
-        fmt::print(stderr, "ERROR: {} conflicts with {}; choose one replay budget.\n",
+        std::print(stderr, "ERROR: {} conflicts with {}; choose one replay budget.\n",
                    option, options.replay_budget_option);
         return false;
     }
@@ -3918,7 +3919,7 @@ ParseArgsResult parseArgs(int argc, char* argv[]) {
             }
             auto value = parsePositiveInt(arg.substr(17));
             if (!value) {
-                fmt::print(stderr, "Invalid --fixed-movetime value: {}\n", arg.substr(17));
+                std::print(stderr, "Invalid --fixed-movetime value: {}\n", arg.substr(17));
                 result.ok = false;
                 result.exit_code = 1;
                 return result;
@@ -3998,7 +3999,7 @@ ParseArgsResult parseArgs(int argc, char* argv[]) {
             options.verbose = true;
             options.print_move_output = true;
         } else if (startsWith(arg, "-")) {
-            fmt::print(stderr, "Unknown or malformed option: {}\n", arg);
+            std::print(stderr, "Unknown or malformed option: {}\n", arg);
             result.ok = false;
             result.exit_code = 1;
             return result;
@@ -4073,68 +4074,68 @@ bool validateArgs(ReplayOptions& options, const char* prog) {
     resolvePositionalArgs(options);
 
     if (options.logfile_targets.empty()) {
-        fmt::print(stderr, "ERROR: No logfile specified\n\n");
+        std::print(stderr, "ERROR: No logfile specified\n\n");
         printHelp(prog);
         return false;
     }
 
     if (!options.analyze && options.analysis_target == "log") {
-        fmt::print(stderr, "ERROR: --log cannot be used with --no-analysis\n");
+        std::print(stderr, "ERROR: --log cannot be used with --no-analysis\n");
         return false;
     }
     if (options.reference_path_explicit && !options.analyze) {
-        fmt::print(stderr, "ERROR: --reference needs oracle analysis; remove --no-analysis\n");
+        std::print(stderr, "ERROR: --reference needs oracle analysis; remove --no-analysis\n");
         return false;
     }
     if (options.jsonl_output && options.analysis_target == "log") {
-        fmt::print(stderr, "ERROR: --jsonl is only supported for replay mode\n");
+        std::print(stderr, "ERROR: --jsonl is only supported for replay mode\n");
         return false;
     }
     if (options.jsonl_output && !options.analyze) {
-        fmt::print(stderr, "ERROR: --jsonl needs oracle analysis; remove --no-analysis\n");
+        std::print(stderr, "ERROR: --jsonl needs oracle analysis; remove --no-analysis\n");
         return false;
     }
     if (options.jsonl_output)
         options.print_move_output = false;
     if ((options.fixed_replay_nodes > 0 || options.fixed_replay_movetime_ms > 0)
      && options.time_mode) {
-        fmt::print(stderr, "ERROR: fixed replay budgets cannot be combined with --time\n");
+        std::print(stderr, "ERROR: fixed replay budgets cannot be combined with --time\n");
         return false;
     }
     if (options.jsonl_output && options.moves_explicit) {
-        fmt::print(stderr, "ERROR: --jsonl and --moves both want per-position output; choose one.\n");
+        std::print(stderr, "ERROR: --jsonl and --moves both want per-position output; choose one.\n");
         return false;
     }
     if (options.jsonl_output && options.color_explicit)
-        fmt::print(stderr, "WARNING: --color has no effect with --jsonl.\n");
+        std::print(stderr, "WARNING: --color has no effect with --jsonl.\n");
     if (!options.jsonl_output && options.jsonl_selection_explicit)
-        fmt::print(stderr, "WARNING: JSONL move-selection options are ignored without --jsonl.\n");
+        std::print(stderr, "WARNING: JSONL move-selection options are ignored without --jsonl.\n");
     if (options.jobs_explicit && !options.run_as_batch)
-        fmt::print(stderr, "WARNING: --jobs is ignored for a single log.\n");
+        std::print(stderr, "WARNING: --jobs is ignored for a single log.\n");
     if (options.analysis_target == "log") {
         if (options.candidate_path_explicit || options.candidate_opts_explicit || options.candidate_uci_explicit) {
-            fmt::print(stderr,
+            std::print(stderr,
                        "ERROR: --log does not run the candidate engine; "
                        "remove --candidate/--candidate-opts/--candidate-uci.\n");
             return false;
         }
         if (options.reference_path_explicit || options.reference_opts_explicit || options.reference_uci_explicit) {
-            fmt::print(stderr,
+            std::print(stderr,
                        "ERROR: --log does not run the reference engine; "
                        "remove --reference/--reference-opts/--reference-uci.\n");
             return false;
         }
         if (options.threads_explicit)
-            fmt::print(stderr, "WARNING: --threads is ignored with --log.\n");
+            std::print(stderr, "WARNING: --threads is ignored with --log.\n");
         if (options.replay_budget_explicit && !options.time_mode)
-            fmt::print(stderr, "WARNING: {} is ignored with --log.\n", options.replay_budget_option);
+            std::print(stderr, "WARNING: {} is ignored with --log.\n", options.replay_budget_option);
     }
     if (!options.analyze
      && (options.oracle_path_explicit
       || options.oracle_opts_explicit
       || options.oracle_uci_explicit
       || options.oracle_limit_explicit)) {
-        fmt::print(stderr, "ERROR: oracle options need analysis; remove them or remove --no-analysis.\n");
+        std::print(stderr, "ERROR: oracle options need analysis; remove them or remove --no-analysis.\n");
         return false;
     }
     if (options.reference_path_explicit
@@ -4144,7 +4145,7 @@ bool validateArgs(ReplayOptions& options, const char* prog) {
                              options.reference_path,
                              options.reference_opts,
                              options.reference_setoptions)) {
-        fmt::print(stderr,
+        std::print(stderr,
                    "WARNING: --reference uses the same engine/options as --candidate; "
                    "this adds searches but no comparison signal.\n");
     }
@@ -4154,7 +4155,7 @@ bool validateArgs(ReplayOptions& options, const char* prog) {
                       && options.analysis_target == "log"
                       && std::getenv(kSuppressLogTimeWarning) == nullptr;
     if (warn_log_time) {
-        fmt::print(stderr,
+        std::print(stderr,
                    "WARNING: --time is ignored with --log.\n");
         if (options.run_as_batch)
             setenv(kSuppressLogTimeWarning, "1", 1);
@@ -4198,7 +4199,7 @@ int runSingleLog(ReplayOptions& options) {
     std::vector<std::string>& oracle_opts = options.oracle_opts;
 
     if (std::filesystem::path(logfile).extension() != ".log") {
-        fmt::print(stderr, "ERROR: replay needs a .log file.\n");
+        std::print(stderr, "ERROR: replay needs a .log file.\n");
         return 1;
     }
 
@@ -4208,7 +4209,7 @@ int runSingleLog(ReplayOptions& options) {
                                    fixed_replay_movetime_ms);
         std::vector<LogEntry> entries = parsed.entries;
         if (entries.empty()) {
-            fmt::print(stderr, "ERROR: No UCI go/bestmove pairs found in '{}'\n", logfile);
+            std::print(stderr, "ERROR: No UCI go/bestmove pairs found in '{}'\n", logfile);
             return 1;
         }
 
@@ -4222,7 +4223,7 @@ int runSingleLog(ReplayOptions& options) {
         int total_entries = (int)entries.size();
         int display_total = entries.back().fullmove;
         if (print_move_output)
-            printBatchBlock(fmt::format("Extracted {} go commands and {} logged moves\n",
+            printBatchBlock(std::format("Extracted {} go commands and {} logged moves\n",
                                         total_entries, total_entries));
 
         bool full_log_range = start_move <= 0 && count < 0;
@@ -4233,13 +4234,13 @@ int runSingleLog(ReplayOptions& options) {
                     return entry.fullmove < fullmove;
                 });
             if (first == entries.end()) {
-                fmt::print(stderr, "ERROR: --move {} leaves no matching or later positions\n", start_move);
+                std::print(stderr, "ERROR: --move {} leaves no matching or later positions\n", start_move);
                 return 1;
             }
             int skipped = (int)std::distance(entries.begin(), first);
             entries.erase(entries.begin(), first);
             if (print_move_output) {
-                printBatchBlock(fmt::format("Starting at fullmove {}; skipped {} log entries; {} remaining\n",
+                printBatchBlock(std::format("Starting at fullmove {}; skipped {} log entries; {} remaining\n",
                                             entries.front().fullmove, skipped, entries.size()));
             }
         }
@@ -4247,17 +4248,17 @@ int runSingleLog(ReplayOptions& options) {
         if (count >= 0 && (int)entries.size() > count) {
             entries.erase(entries.begin() + count, entries.end());
             if (print_move_output)
-                printBatchBlock(fmt::format("Limiting to {} moves\n", count));
+                printBatchBlock(std::format("Limiting to {} moves\n", count));
         }
 
         ReplayLineWidths line_widths = replayLineWidths(entries, display_total);
 
         if (needs_candidate && !executableExists(candidate_path)) {
-            fmt::print(stderr, "ERROR: Candidate engine '{}' not found or not executable\n", candidate_path);
+            std::print(stderr, "ERROR: Candidate engine '{}' not found or not executable\n", candidate_path);
             return 1;
         }
         if (compare_reference && !executableExists(reference_path)) {
-            fmt::print(stderr, "ERROR: Reference engine '{}' not found or not executable\n", reference_path);
+            std::print(stderr, "ERROR: Reference engine '{}' not found or not executable\n", reference_path);
             return 1;
         }
 
@@ -4265,8 +4266,8 @@ int runSingleLog(ReplayOptions& options) {
         std::string oracle_id = "none";
         if (analyze) {
             if (!executableExists(oracle_path)) {
-                fmt::print(stderr, "ERROR: Oracle engine '{}' not found or not executable\n", oracle_path);
-                fmt::print(stderr, "Use --oracle <path> or --no-analysis.\n");
+                std::print(stderr, "ERROR: Oracle engine '{}' not found or not executable\n", oracle_path);
+                std::print(stderr, "Use --oracle <path> or --no-analysis.\n");
                 return 1;
             }
 
@@ -4311,11 +4312,11 @@ int runSingleLog(ReplayOptions& options) {
                 printBatchBlock(formatDiagnosticsReport(entries, display_total,
                                                         color_output, verbose));
             } else {
-                fmt::print("\n");
+                std::print("\n");
             }
             printSummaryReport(analysis_report_body, color_output, include_fen);
             if (analysis_report_body.empty() || analysis_report_body.back() != '\n')
-                fmt::print("\n");
+                std::print("\n");
 
             return reportTriggersFailure(analysis_report_body) ? 1 : 0;
         }
@@ -4361,10 +4362,10 @@ int runSingleLog(ReplayOptions& options) {
             reference_engine.reset();
         }
 
-        std::string engine_summary = fmt::format("candidate: {}\nreference: {}\n",
+        std::string engine_summary = std::format("candidate: {}\nreference: {}\n",
             candidate_id, reference_id);
         if (jsonl_output)
-            fmt::print(stderr, "{}", batchIndent(engine_summary));
+            std::print(stderr, "{}", batchIndent(engine_summary));
         else
             printBatchBlock(engine_summary);
 
@@ -4456,17 +4457,17 @@ int runSingleLog(ReplayOptions& options) {
                         // ones) for a smooth, steadily-incrementing signal.
                         double avg_diff_cp = static_cast<double>(comparison_stats.delta_loss)
                             / comparison_stats.positions;
-                        fmt::print(stderr, "[{}/{}] avg_diff_cp: {:+.2f} n={}\n",
+                        std::print(stderr, "[{}/{}] avg_diff_cp: {:+.2f} n={}\n",
                                   entry.fullmove, display_total, avg_diff_cp,
                                   comparison_stats.positions);
                         std::fflush(stderr);
                     }
                     reference_suffix = validation.ok
-                        ? fmt::format("reference {} | oracle {} | delta {}",
+                        ? std::format("reference {} | oracle {} | delta {}",
                                       reference_result.bestmove,
                                       validation.oracle_best,
                                       formatSignedCp(validation.delta_loss))
-                        : fmt::format("oracle {}", validation.error);
+                        : std::format("oracle {}", validation.error);
                     bool history_sensitive = mismatch || reference_mismatch;
                     if (jsonl_stream && (!history_sensitive || jsonl_context.include_history_sensitive))
                         writeJsonlComparisonRecord(*jsonl_stream,
@@ -4512,10 +4513,10 @@ int runSingleLog(ReplayOptions& options) {
             }
 
             std::string replay_display = mismatch
-                ? fmt::format("{} != log {}", played_display, expected_display)
+                ? std::format("{} != log {}", played_display, expected_display)
                 : played_display;
             if (print_move_output) {
-                printBatchBlock(fmt::format("[{:>{}}/{}] {:<{}} | WDL {:+.2f} :: {}\n",
+                printBatchBlock(std::format("[{:>{}}/{}] {:<{}} | WDL {:+.2f} :: {}\n",
                                             entry.fullmove, line_widths.fullmove, display_total,
                                             replay_display, line_widths.replay,
                                             result.wdl, reference_suffix));
@@ -4561,12 +4562,12 @@ int runSingleLog(ReplayOptions& options) {
                 // parallel replay processes (e.g. forge). Print it to
                 // stderr rather than discarding it.
                 if (!analysis_report_body.empty())
-                    fmt::print(stderr, "{}", analysis_report_body);
+                    std::print(stderr, "{}", analysis_report_body);
                 std::fflush(stderr);
                 std::string jsonl_report_body = jsonl_buffer.str();
-                fmt::print("{}", jsonl_report_body);
+                std::print("{}", jsonl_report_body);
                 if (!jsonl_report_body.empty() && jsonl_report_body.back() != '\n')
-                    fmt::print("\n");
+                    std::print("\n");
                 return 0;
             }
 
@@ -4584,7 +4585,7 @@ int runSingleLog(ReplayOptions& options) {
 
         return reportTriggersFailure(analysis_report_body) ? 1 : 0;
     } catch (const std::exception& e) {
-        fmt::print(stderr, "Error: {}\n", e.what());
+        std::print(stderr, "Error: {}\n", e.what());
         return 1;
     }
 

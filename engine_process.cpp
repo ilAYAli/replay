@@ -13,7 +13,8 @@
 #include <unistd.h>
 #include <vector>
 
-#include <fmt/format.h>
+#include <format>
+#include <print>
 
 namespace {
 
@@ -28,16 +29,16 @@ bool isDiagnosticLine(const std::string& line) {
 std::string signalDescription(int signal_number) {
     const char* name = strsignal(signal_number);
     if (!name)
-        return fmt::format("signal {}", signal_number);
-    return fmt::format("signal {} ({})", signal_number, name);
+        return std::format("signal {}", signal_number);
+    return std::format("signal {} ({})", signal_number, name);
 }
 
 std::optional<std::string> abnormalStatusMessage(int status) {
     if (WIFSIGNALED(status))
-        return fmt::format("abnormal termination: engine terminated by {}",
+        return std::format("abnormal termination: engine terminated by {}",
                            signalDescription(WTERMSIG(status)));
     if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
-        return fmt::format("abnormal termination: engine exited with status {}",
+        return std::format("abnormal termination: engine exited with status {}",
                            WEXITSTATUS(status));
     return std::nullopt;
 }
@@ -164,11 +165,11 @@ EngineProcess::~EngineProcess() {
 
 void EngineProcess::send(const std::string& cmd) {
     if (impl->verbose)
-        fmt::print(stderr, "uci:> {}\n", cmd);
+        std::print(stderr, "uci:> {}\n", cmd);
     if (fprintf(impl->engine_in, "%s\n", cmd.c_str()) < 0 || fflush(impl->engine_in) == EOF) {
         if (auto abnormal = abnormalTermination())
             throw std::runtime_error(*abnormal);
-        throw std::runtime_error(fmt::format("engine stopped while sending command: {}", cmd));
+        throw std::runtime_error(std::format("engine stopped while sending command: {}", cmd));
     }
 }
 
@@ -191,9 +192,9 @@ std::optional<std::string> EngineProcess::readLine(bool print_diagnostics) {
     if (!line.empty() && line.back() == '\n')
         line.pop_back();
     if (impl->verbose)
-        fmt::print(stderr, "{}\n", line);
+        std::print(stderr, "{}\n", line);
     else if (print_diagnostics && isDiagnosticLine(line))
-        fmt::print(stderr, "{}\n", stripDiagnosticFen(line));
+        std::print(stderr, "{}\n", stripDiagnosticFen(line));
     if (startsWith(line, "id name "))
         impl->uci_name = line.substr(8);
     else if (startsWith(line, "id author "))
@@ -236,13 +237,13 @@ void waitForToken(EngineProcess& engine, const std::string& token) {
         if (!engine.waitReadable(30000)) {
             if (engine.hasExited())
                 throw std::runtime_error(engine.terminationMessage(
-                    fmt::format("while waiting for {}", token)));
-            throw std::runtime_error(fmt::format("timed out waiting for {}", token));
+                    std::format("while waiting for {}", token)));
+            throw std::runtime_error(std::format("timed out waiting for {}", token));
         }
 
         auto line = engine.readLine();
         if (!line)
-            throw std::runtime_error(fmt::format("engine closed stdout while waiting for {}", token));
+            throw std::runtime_error(std::format("engine closed stdout while waiting for {}", token));
         if (*line == token)
             return;
     }
@@ -259,7 +260,7 @@ void initializeEngine(EngineProcess& engine,
         engine.send(option);
 
     if (threads > 0)
-        engine.send(fmt::format("setoption name Threads value {}", threads));
+        engine.send(std::format("setoption name Threads value {}", threads));
 
     for (const auto& option : extra_setoptions)
         engine.send(option);
